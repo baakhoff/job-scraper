@@ -136,6 +136,68 @@ class JobListing(BaseModel):
         )
 
 
+class Position(BaseModel):
+    """A role/keyword the user has searched for (e.g. 'python developer').
+
+    A position groups the listings found for that search and, through them, the
+    companies hiring for it. ``id`` is assigned by the database.
+    """
+
+    id: int | None = None
+    keyword: str = Field(..., description="The search term, as displayed.")
+    location: str | None = None
+    company_count: int = Field(0, description="Distinct companies hiring for this position.")
+    listing_count: int = Field(0, description="Listings stored for this position.")
+
+
+class Company(BaseModel):
+    """A company aggregated from job listings, optionally enriched.
+
+    The core fields (``name``, ``company_url``) come free from every search
+    card; the rest are filled in best-effort by a company-page enrichment pass.
+    """
+
+    id: int | None = None
+    name: str
+    company_url: HttpUrl | None = None
+    slug: str | None = Field(None, description="The '/company/{slug}' handle, when known.")
+    location: str | None = None
+    industry: str | None = None
+    company_size: str | None = None
+    website: str | None = None
+    description: str | None = None
+    listing_count: int = Field(0, description="Open listings stored for this company.")
+
+
+class CompanyPerson(BaseModel):
+    """A person associated with a company — e.g. a CEO or founder.
+
+    Discovered by searching people who work at the company by keyword. The
+    ``keyword`` records which term surfaced them ('CEO', 'Founder', …).
+    """
+
+    id: int | None = None
+    name: str
+    headline: str | None = Field(None, description="Their LinkedIn headline / title line.")
+    profile_url: HttpUrl | None = None
+    keyword: str | None = None
+    source: str | None = Field(None, description="Which provider produced this record.")
+
+
+def company_slug(url: object) -> str | None:
+    """Extract the lowercased ``/company/{slug}`` handle from a LinkedIn URL."""
+    if not url:
+        return None
+    match = re.search(r"/company/([^/?#]+)", str(url))
+    return match.group(1).lower() if match else None
+
+
+def normalize_company_name(name: object) -> str | None:
+    """Lowercase + collapse whitespace, for name-based company de-duplication."""
+    cleaned = _clean_text(name)
+    return cleaned.lower() or None
+
+
 def _clean_text(value: object) -> str:
     """Collapse runs of whitespace and strip; ``None`` becomes ``""``."""
     if value is None:

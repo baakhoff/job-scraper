@@ -25,11 +25,29 @@ from collections.abc import Iterable, Sequence
 from datetime import UTC, datetime
 
 import structlog
-from sqlalchemy import Connection, DateTime, Integer, String, select, text
+from sqlalchemy import (
+    Connection,
+    DateTime,
+    ForeignKey,
+    Integer,
+    String,
+    UniqueConstraint,
+    func,
+    select,
+    text,
+)
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
-from .models import JobListing, WorkplaceType
+from .models import (
+    Company,
+    CompanyPerson,
+    JobListing,
+    Position,
+    WorkplaceType,
+    company_slug,
+    normalize_company_name,
+)
 
 log = structlog.get_logger(__name__)
 
@@ -60,6 +78,15 @@ class JobRecord(Base):
     industries: Mapped[str | None] = mapped_column(String, nullable=True)
     applicant_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    # Relational links, added in the Positions/Companies model. Nullable so
+    # legacy rows (and back-compat ``save_jobs``) remain valid; new searches
+    # populate them via ``save_search_results``.
+    position_id: Mapped[int | None] = mapped_column(
+        ForeignKey("positions.id"), nullable=True, index=True
+    )
+    company_id: Mapped[int | None] = mapped_column(
+        ForeignKey("companies.id"), nullable=True, index=True
+    )
 
     def to_listing(self) -> JobListing:
         """Reconstruct a domain :class:`JobListing` from this row."""
@@ -85,6 +112,85 @@ class JobRecord(Base):
 
 # Alias so the table name reads naturally where the task refers to it.
 JobListingORM = JobRecord
+
+
+class PositionRecord(Base):
+    """A searched role; groups the listings (and thus companies) found for it."""
+
+    __tablename__ = "positions"
+    __table_args__ = (UniqueConstraint("keyword", "location", name="uq_position_keyword_loc"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    # Normalized (lowercased) form used for de-duplication / lookup.
+    keyword: Mapped[str] = mapped_column(String, index=True)
+    # Original-case keyword for display.
+    display_keyword: Mapped[str] = mapped_column(String)
+    location: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class CompanyRecord(Base):
+    """A company aggregated from listings; enrichment columns fill in on demand."""
+
+    __tablename__ = "companies"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String)
+    # Lowercased name, the fallback de-dupe key when no slug is available.
+    normalized_name: Mapped[str] = mapped_column(String, index=True)
+    # The '/company/{slug}' handle — the preferred de-dupe key when present.
+    slug: Mapped[str | None] = mapped_column(String, index=True, nullable=True)
+    company_url: Mapped[str | None] = mapped_column(String, nullable=True)
+    location: Mapped[str | None] = mapped_column(String, nullable=True)
+    industry: Mapped[str | None] = mapped_column(String, nullable=True)
+    company_size: Mapped[str | None] = mapped_column(String, nullable=True)
+    website: Mapped[str | None] = mapped_column(String, nullable=True)
+    description: Mapped[str | None] = mapped_column(String, nullable=True)
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+    def to_company(self, *, listing_count: int = 0) -> Company:
+        """Reconstruct a domain :class:`Company` from this row."""
+        return Company(
+            id=self.id,
+            name=self.name,
+            company_url=self.company_url,
+            slug=self.slug,
+            location=self.location,
+            industry=self.industry,
+            company_size=self.company_size,
+            website=self.website,
+            description=self.description,
+            listing_count=listing_count,
+        )
+
+
+class CompanyPersonRecord(Base):
+    """A person linked to a company (e.g. CEO / founder)."""
+
+    __tablename__ = "company_people"
+    __table_args__ = (
+        UniqueConstraint("company_id", "name", name="uq_person_company_name"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    company_id: Mapped[int] = mapped_column(ForeignKey("companies.id"), index=True)
+    name: Mapped[str] = mapped_column(String)
+    headline: Mapped[str | None] = mapped_column(String, nullable=True)
+    profile_url: Mapped[str | None] = mapped_column(String, nullable=True)
+    keyword: Mapped[str | None] = mapped_column(String, nullable=True)
+    source: Mapped[str | None] = mapped_column(String, nullable=True)
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+    def to_person(self) -> CompanyPerson:
+        """Reconstruct a domain :class:`CompanyPerson` from this row."""
+        return CompanyPerson(
+            id=self.id,
+            name=self.name,
+            headline=self.headline,
+            profile_url=self.profile_url,
+            keyword=self.keyword,
+            source=self.source,
+        )
 
 
 def resolve_database_url(source: str | None = None) -> str:
@@ -169,6 +275,32 @@ class Storage:
             await conn.run_sync(Base.metadata.create_all)
             if self.engine.dialect.name == "sqlite":
                 await conn.run_sync(_add_missing_sqlite_columns)
+            elif self.engine.dialect.name == "postgresql":
+                await conn.run_sync(_add_missing_pg_columns)
+        await self._backfill_companies()
+
+    async def _backfill_companies(self) -> None:
+        """Link legacy listings (``company_id IS NULL``) to ``companies`` rows.
+
+        Older databases predate the relational schema: their ``job_listings``
+        rows have no ``company_id``. Derive a company from each such row's stored
+        ``company`` / ``company_url`` and link it, so the Companies/Explore views
+        include historical data. Positions can't be backfilled (the old schema
+        never stored the search term), so ``position_id`` is left NULL.
+        """
+        now = datetime.now(UTC)
+        async with AsyncSession(self.engine) as session:
+            stmt = select(JobRecord).where(JobRecord.company_id.is_(None))
+            rows: Sequence[JobRecord] = (await session.scalars(stmt)).all()
+            if not rows:
+                return
+            for row in rows:
+                company, _ = await self._get_or_create_company(
+                    session, name=row.company, company_url=row.company_url, now=now
+                )
+                row.company_id = company.id
+            await session.commit()
+            log.info("company_backfill", linked=len(rows))
 
     async def save_jobs(self, listings: Iterable[JobListing]) -> int:
         """Insert or update listings keyed by ``job_id``; return rows newly inserted.
@@ -242,6 +374,340 @@ class Storage:
     async def all_listings(self) -> list[JobListing]:
         """Read every stored listing back as ``JobListing`` models."""
         return await self.get_jobs()
+
+    # ------------------------------------------------------------------ #
+    # Relational model: positions, companies, people                     #
+    # ------------------------------------------------------------------ #
+
+    def _session(self) -> AsyncSession:
+        """Session that keeps attributes usable after commit (no async lazy-load)."""
+        return AsyncSession(self.engine, expire_on_commit=False)
+
+    async def save_search_results(
+        self,
+        listings: Iterable[JobListing],
+        *,
+        keyword: str,
+        location: str | None = None,
+    ) -> dict[str, int]:
+        """Persist a search: upsert the position, dedupe companies, link listings.
+
+        De-duplication is *insert-if-absent*: a listing already present (by
+        ``job_id``) is updated in place; a company already present (by slug, else
+        normalized name) is reused; the position is reused by
+        ``(keyword, location)``. Returns counts ``{new_listings, new_companies,
+        total_listings}``.
+        """
+        now = datetime.now(UTC)
+        rows = list(listings)
+        new_listings = 0
+        new_company_ids: set[int] = set()
+        async with self._session() as session:
+            position = await self._get_or_create_position(
+                session, keyword=keyword, location=location, now=now
+            )
+            for listing in rows:
+                company, created = await self._get_or_create_company(
+                    session,
+                    name=listing.company,
+                    company_url=str(listing.company_url) if listing.company_url else None,
+                    now=now,
+                )
+                if created and company.id is not None:
+                    new_company_ids.add(company.id)
+                existing = await session.get(JobRecord, listing.job_id)
+                if existing is None:
+                    record = _to_record(listing, first_seen_at=now)
+                    record.position_id = position.id
+                    record.company_id = company.id
+                    session.add(record)
+                    new_listings += 1
+                else:
+                    _update_record(existing, listing)
+                    existing.position_id = position.id
+                    existing.company_id = company.id
+            await session.commit()
+        result = {
+            "position_id": position.id,
+            "new_listings": new_listings,
+            "new_companies": len(new_company_ids),
+            "total_listings": len(rows),
+        }
+        log.info("search_results_saved", **result)
+        return result
+
+    async def _get_or_create_position(
+        self, session: AsyncSession, *, keyword: str, location: str | None, now: datetime
+    ) -> PositionRecord:
+        """Find a position by (normalized keyword, location) or create it."""
+        norm = keyword.strip().lower()
+        loc = location or None
+        loc_cond = (
+            PositionRecord.location.is_(None) if loc is None else PositionRecord.location == loc
+        )
+        stmt = select(PositionRecord).where(PositionRecord.keyword == norm, loc_cond).limit(1)
+        existing = (await session.scalars(stmt)).first()
+        if existing is not None:
+            return existing
+        record = PositionRecord(
+            keyword=norm, display_keyword=keyword, location=loc, created_at=now
+        )
+        session.add(record)
+        await session.flush()  # assign primary key for linking
+        return record
+
+    async def _get_or_create_company(
+        self, session: AsyncSession, *, name: str, company_url: str | None, now: datetime
+    ) -> tuple[CompanyRecord, bool]:
+        """Find a company by slug (else normalized name) or create it.
+
+        Returns ``(record, created)``. Opportunistically backfills a missing
+        url/slug on an existing row.
+        """
+        slug = company_slug(company_url)
+        norm = normalize_company_name(name) or name.strip().lower()
+        if slug:
+            stmt = select(CompanyRecord).where(CompanyRecord.slug == slug)
+        else:
+            stmt = select(CompanyRecord).where(
+                CompanyRecord.normalized_name == norm, CompanyRecord.slug.is_(None)
+            )
+        existing = (await session.scalars(stmt.limit(1))).first()
+        if existing is not None:
+            if company_url and not existing.company_url:
+                existing.company_url = company_url
+            if slug and not existing.slug:
+                existing.slug = slug
+            return existing, False
+        record = CompanyRecord(
+            name=name,
+            normalized_name=norm,
+            slug=slug,
+            company_url=company_url,
+            first_seen_at=now,
+        )
+        session.add(record)
+        await session.flush()  # assign primary key for linking
+        return record, True
+
+    async def get_positions(self) -> list[Position]:
+        """All searched positions with company + listing counts, newest-first."""
+        async with self._session() as session:
+            records = (
+                await session.scalars(
+                    select(PositionRecord).order_by(PositionRecord.created_at.desc())
+                )
+            ).all()
+            positions: list[Position] = []
+            for rec in records:
+                listing_count = (
+                    await session.scalar(
+                        select(func.count())
+                        .select_from(JobRecord)
+                        .where(JobRecord.position_id == rec.id)
+                    )
+                ) or 0
+                company_count = (
+                    await session.scalar(
+                        select(func.count(func.distinct(JobRecord.company_id))).where(
+                            JobRecord.position_id == rec.id
+                        )
+                    )
+                ) or 0
+                positions.append(
+                    Position(
+                        id=rec.id,
+                        keyword=rec.display_keyword,
+                        location=rec.location,
+                        company_count=company_count,
+                        listing_count=listing_count,
+                    )
+                )
+            return positions
+
+    async def get_companies_for_position(self, position_id: int) -> list[Company]:
+        """Companies hiring for a position (derived from listings), by listing count."""
+        async with self._session() as session:
+            stmt = (
+                select(JobRecord.company_id, func.count().label("cnt"))
+                .where(JobRecord.position_id == position_id, JobRecord.company_id.is_not(None))
+                .group_by(JobRecord.company_id)
+            )
+            pairs = (await session.execute(stmt)).all()
+            companies: list[Company] = []
+            for company_id, count in pairs:
+                rec = await session.get(CompanyRecord, company_id)
+                if rec is not None:
+                    companies.append(rec.to_company(listing_count=count))
+            companies.sort(key=lambda c: c.listing_count, reverse=True)
+            return companies
+
+    async def get_companies(
+        self, *, keyword: str | None = None, limit: int | None = None
+    ) -> list[Company]:
+        """All stored companies (optional name filter), with listing counts."""
+        async with self._session() as session:
+            counts = {
+                cid: cnt
+                for cid, cnt in (
+                    await session.execute(
+                        select(JobRecord.company_id, func.count())
+                        .where(JobRecord.company_id.is_not(None))
+                        .group_by(JobRecord.company_id)
+                    )
+                ).all()
+            }
+            stmt = select(CompanyRecord).order_by(CompanyRecord.name)
+            if keyword:
+                stmt = stmt.where(CompanyRecord.name.icontains(keyword))
+            if limit is not None:
+                stmt = stmt.limit(limit)
+            records = (await session.scalars(stmt)).all()
+            return [rec.to_company(listing_count=counts.get(rec.id, 0)) for rec in records]
+
+    async def get_company(self, company_id: int) -> Company | None:
+        """A single company with its listing count, or ``None``."""
+        async with self._session() as session:
+            rec = await session.get(CompanyRecord, company_id)
+            if rec is None:
+                return None
+            count = (
+                await session.scalar(
+                    select(func.count())
+                    .select_from(JobRecord)
+                    .where(JobRecord.company_id == company_id)
+                )
+            ) or 0
+            return rec.to_company(listing_count=count)
+
+    async def update_company(self, company_id: int, **fields: object) -> Company | None:
+        """Patch non-null enrichment fields on a company; return the updated row."""
+        async with self._session() as session:
+            rec = await session.get(CompanyRecord, company_id)
+            if rec is None:
+                return None
+            for key, value in fields.items():
+                if value is not None and hasattr(rec, key):
+                    setattr(rec, key, value)
+            await session.commit()
+            count = (
+                await session.scalar(
+                    select(func.count())
+                    .select_from(JobRecord)
+                    .where(JobRecord.company_id == company_id)
+                )
+            ) or 0
+            return rec.to_company(listing_count=count)
+
+    async def get_listings_for_company(self, company_id: int) -> list[JobListing]:
+        """All listings stored for a company, newest-first."""
+        async with self._session() as session:
+            records = (
+                await session.scalars(
+                    select(JobRecord)
+                    .where(JobRecord.company_id == company_id)
+                    .order_by(JobRecord.posted_at.desc().nullslast())
+                )
+            ).all()
+            return [rec.to_listing() for rec in records]
+
+    async def get_listing(self, job_id: str) -> JobListing | None:
+        """A single listing by ``job_id``, or ``None``."""
+        async with self._session() as session:
+            rec = await session.get(JobRecord, job_id)
+            return rec.to_listing() if rec is not None else None
+
+    async def update_listing(self, job_id: str, **fields: object) -> JobListing | None:
+        """Patch non-null enrichment fields on a listing; return the updated row."""
+        async with self._session() as session:
+            rec = await session.get(JobRecord, job_id)
+            if rec is None:
+                return None
+            for key, value in fields.items():
+                if value is not None and hasattr(rec, key):
+                    setattr(rec, key, value)
+            await session.commit()
+            return rec.to_listing()
+
+    async def upsert_company_people(
+        self, company_id: int, people: Iterable[CompanyPerson]
+    ) -> int:
+        """Insert people for a company, deduped by profile_url else name. Returns new count."""
+        now = datetime.now(UTC)
+        new = 0
+        async with self._session() as session:
+            for person in people:
+                stmt = select(CompanyPersonRecord).where(
+                    CompanyPersonRecord.company_id == company_id
+                )
+                if person.profile_url:
+                    stmt = stmt.where(
+                        CompanyPersonRecord.profile_url == str(person.profile_url)
+                    )
+                else:
+                    stmt = stmt.where(CompanyPersonRecord.name == person.name)
+                existing = (await session.scalars(stmt.limit(1))).first()
+                if existing is None:
+                    session.add(
+                        CompanyPersonRecord(
+                            company_id=company_id,
+                            name=person.name,
+                            headline=person.headline,
+                            profile_url=str(person.profile_url) if person.profile_url else None,
+                            keyword=person.keyword,
+                            source=person.source,
+                            first_seen_at=now,
+                        )
+                    )
+                    new += 1
+                else:
+                    if person.headline and not existing.headline:
+                        existing.headline = person.headline
+                    if person.keyword and not existing.keyword:
+                        existing.keyword = person.keyword
+            await session.commit()
+        log.info("company_people_saved", company_id=company_id, new=new)
+        return new
+
+    async def get_people_for_company(self, company_id: int) -> list[CompanyPerson]:
+        """All people stored for a company, oldest-first."""
+        async with self._session() as session:
+            records = (
+                await session.scalars(
+                    select(CompanyPersonRecord)
+                    .where(CompanyPersonRecord.company_id == company_id)
+                    .order_by(CompanyPersonRecord.first_seen_at)
+                )
+            ).all()
+            return [rec.to_person() for rec in records]
+
+    async def all_people(self) -> list[tuple[int, CompanyPerson]]:
+        """Every stored person paired with its company id (for export)."""
+        async with self._session() as session:
+            records = (
+                await session.scalars(
+                    select(CompanyPersonRecord).order_by(CompanyPersonRecord.company_id)
+                )
+            ).all()
+            return [(rec.company_id, rec.to_person()) for rec in records]
+
+
+def _add_missing_pg_columns(conn: Connection) -> None:
+    """Add new ``job_listings`` FK columns to a pre-existing Postgres table.
+
+    Postgres ``create_all`` won't alter an existing table, so add the relational
+    columns idempotently (``ADD COLUMN IF NOT EXISTS``). Fresh installs get the
+    full columns — including the FK constraints — from ``create_all`` directly.
+    """
+    table_name = JobRecord.__tablename__
+    for column in (JobRecord.__table__.c.position_id, JobRecord.__table__.c.company_id):
+        col_type = column.type.compile(conn.dialect)
+        conn.execute(
+            text(
+                f'ALTER TABLE "{table_name}" '
+                f'ADD COLUMN IF NOT EXISTS "{column.name}" {col_type}'
+            )
+        )
 
 
 def _add_missing_sqlite_columns(conn: Connection) -> None:

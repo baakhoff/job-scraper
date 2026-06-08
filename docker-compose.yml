@@ -53,6 +53,25 @@ services:
     <<: *ljp-common
     restart: "no"
 
+  # The browser UI. Starts with the stack and stays up; open it at
+  #   http://127.0.0.1:8000  (override the host port with LJP_WEB_PORT).
+  # Bound to 127.0.0.1 so it's reachable from this machine only, not the LAN.
+  # Inside the container uvicorn binds 0.0.0.0 so the published port works.
+  web:
+    <<: *ljp-common
+    command:
+      ["python", "-m", "uvicorn", "web:app", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "127.0.0.1:${LJP_WEB_PORT:-8000}:8000"
+    restart: unless-stopped
+    healthcheck:
+      # Liveness only — hits the static page, so it doesn't depend on the DB.
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
   # Continuously re-run the search on a schedule. Enable with its profile:
   #   docker compose --profile scheduler up -d
   scheduler:

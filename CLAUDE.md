@@ -15,19 +15,33 @@ A linear async pipeline, one stage per module:
 
 | Stage   | File              | Responsibility                                            |
 | ------- | ----------------- | --------------------------------------------------------- |
-| Input   | `config.py`       | Search defaults, delays, output path (pydantic-settings). |
-| Models  | `src/models.py`   | `SearchParams` (query in) and `JobListing` (record out).  |
-| Scrape  | `src/scraper.py`  | Async httpx fetcher, offset pagination, rate limiting.    |
-| Parse   | `src/parser.py`   | BeautifulSoup: job-card HTML → loosely-typed raw dicts.   |
+| Input   | `config.py`       | Search defaults, delays, enrichment/people flags.         |
+| Models  | `src/models.py`   | Pydantic: `SearchParams`, `JobListing`, `Position`, `Company`, `CompanyPerson`. |
+| Scrape  | `src/scraper.py`  | Async httpx fetcher: jobs search/detail + `fetch_company` / `search_people`. |
+| Parse   | `src/parser.py`   | BeautifulSoup: job / company / people HTML → raw dicts.    |
 | Filter  | `src/filters.py`  | In-process narrowing: keywords, workplace type, dedupe.   |
-| Store   | `src/storage.py`  | async SQLAlchemy 2.0 → Postgres/SQLite, upsert by `job_id`. |
-| CLI     | `main.py`         | Typer entrypoint wiring the pipeline together.            |
+| People  | `src/people.py`   | Pluggable CEO/Founder discovery (`PeopleProvider`).       |
+| Export  | `src/export.py`   | Row dicts → CSV / JSON (stdlib).                           |
+| Store   | `src/storage.py`  | async SQLAlchemy 2.0 → Postgres/SQLite; relational model + dedupe. |
+| CLI     | `main.py`         | Typer entrypoint wiring the search pipeline.              |
+| Web     | `web.py` + `templates/index.html` | FastAPI JSON API + tabbed SPA (Jobs/Companies/Explore). |
 
 Data flow: `SearchParams → scraper (HTML pages) → parser (raw dicts) →
-JobListing.from_raw → filters → Storage.upsert_many`.
+JobListing.from_raw → filters → Storage.save_search_results`.
 
 Keep modules single-responsibility. The parser emits plain dicts (no
 validation); `JobListing.from_raw` is the one place that cleans and validates.
+
+### Relational model (`src/storage.py`)
+
+Four tables: `positions`, `companies`, `job_listings` (kept by name, now with
+nullable `position_id`/`company_id` FKs), and `company_people`. The
+Position↔Company many-to-many is **derived** from listings via a `DISTINCT`
+query — there is no link table. De-duplication is insert-if-absent: listings by
+`job_id`, companies by slug (else normalized name), positions by
+`(keyword, location)`, people by `profile_url` (else `(company_id, name)`).
+`init_db` migrates old DBs in place (SQLite + Postgres column-adds) and
+backfills companies for legacy listings.
 
 ## Scraping approach
 
@@ -43,8 +57,8 @@ validation); `JobListing.from_raw` is the one place that cleans and validates.
 
 Python 3.11+, httpx (async), BeautifulSoup4 + lxml, pydantic v2 +
 pydantic-settings, async SQLAlchemy 2.0 (PostgreSQL via `asyncpg`, SQLite via
-`aiosqlite`), typer, structlog. Tooling: ruff (line length 100), mypy
-`--strict`, pytest (`asyncio_mode = auto`).
+`aiosqlite`), FastAPI + uvicorn (web UI), typer (CLI), structlog. Tooling: ruff
+(line length 100), mypy `--strict`, pytest (`asyncio_mode = auto`).
 
 ## Gotchas
 
@@ -61,8 +75,13 @@ pydantic-settings, async SQLAlchemy 2.0 (PostgreSQL via `asyncpg`, SQLite via
 - **Be a good citizen / legal.** Public data only, conservative request rates,
   honest `User-Agent`. Respect LinkedIn's Terms of Service; this is intended
   for personal, low-volume use.
-- **Stubs everywhere.** Most functions raise `NotImplementedError`. Implement a
-  stage end-to-end (scraper → parser → models) before wiring the next.
+- **CEO/Founder (people) search is best-effort and OFF by default.** LinkedIn's
+  public *people* search is generally login-gated (the endpoint audit never
+  validated it), so `LinkedInPeopleProvider` usually returns nothing. It sits
+  behind `PeopleProvider` in `src/people.py` so a real data source can replace
+  it without touching the rest; the default is `NullPeopleProvider`. Company
+  enrichment (`fetch_company` / `parse_company_html`) is similarly unproven and
+  fragile — both degrade to "nothing found", never crash.
 
 ## Conventions
 

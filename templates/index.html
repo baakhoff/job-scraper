@@ -1,0 +1,443 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>LinkedIn Job Parser</title>
+  <style>
+    :root {
+      --bg: #f3f6f9; --card: #fff; --ink: #1d2733; --muted: #5b6b7b; --line: #e1e8ef;
+      --brand: #0a66c2; --brand-dark: #084e95; --good: #1f7a3d; --amber: #9a6a12;
+      --shadow: 0 1px 3px rgba(16,38,60,.08), 0 6px 20px rgba(16,38,60,.06);
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: var(--bg); color: var(--ink); line-height: 1.5; }
+    header { background: var(--brand); color: #fff; padding: 18px 24px; }
+    header h1 { margin: 0; font-size: 20px; font-weight: 700; }
+    header p { margin: 4px 0 0; opacity: .9; font-size: 13px; }
+    .wrap { max-width: 1100px; margin: 0 auto; padding: 20px 24px 60px; }
+
+    /* tabs */
+    .tabs { display: flex; gap: 4px; margin: 18px 0 16px; border-bottom: 1px solid var(--line); }
+    .tab { padding: 10px 18px; cursor: pointer; font-weight: 600; color: var(--muted);
+      border: none; background: none; font-size: 14px; border-bottom: 2px solid transparent; }
+    .tab.active { color: var(--brand-dark); border-bottom-color: var(--brand); }
+
+    .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+      box-shadow: var(--shadow); padding: 18px; }
+
+    form { display: grid; grid-template-columns: repeat(12, 1fr); gap: 12px; align-items: end; }
+    .field { display: flex; flex-direction: column; gap: 6px; }
+    .kw { grid-column: span 4; } .loc { grid-column: span 3; } .wt { grid-column: span 2; }
+    .num { grid-column: span 3; } .det { grid-column: span 4; } .go { grid-column: span 8; }
+    label { font-size: 11px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .4px; }
+    input[type=text], input[type=number], select { padding: 9px 11px; border: 1px solid var(--line);
+      border-radius: 8px; font-size: 14px; background: #fff; color: var(--ink); width: 100%; }
+    input:focus, select:focus { outline: 2px solid var(--brand); border-color: var(--brand); }
+    .checkbox { display: flex; align-items: center; gap: 8px; font-size: 14px; height: 38px; }
+    .checkbox input { width: 16px; height: 16px; }
+
+    button { font: inherit; font-weight: 600; border: none; border-radius: 8px; padding: 9px 16px;
+      cursor: pointer; transition: background .15s, opacity .15s; }
+    .btn-primary { background: var(--brand); color: #fff; }
+    .btn-primary:hover { background: var(--brand-dark); }
+    .btn-ghost { background: #eef3f8; color: var(--brand); }
+    .btn-ghost:hover { background: #e2ebf4; }
+    .btn-sm { padding: 5px 10px; font-size: 12.5px; border-radius: 6px; }
+    button:disabled { opacity: .55; cursor: not-allowed; }
+    .actions { display: flex; gap: 10px; flex-wrap: wrap; }
+
+    .hint { margin-top: 12px; font-size: 12.5px; color: var(--muted);
+      background: #fbf7e9; border: 1px solid #f1e4bd; border-radius: 8px; padding: 9px 12px; }
+
+    .toolbar { display: flex; justify-content: space-between; align-items: center;
+      margin: 22px 0 10px; gap: 12px; flex-wrap: wrap; }
+    #status, .status { min-height: 20px; font-size: 14px; color: var(--muted); display: flex; align-items: center; gap: 10px; }
+    .spinner { width: 15px; height: 15px; border-radius: 50%; border: 2px solid #cdd9e5;
+      border-top-color: var(--brand); animation: spin .7s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .pill { display: inline-block; background: #eaf2fb; color: var(--brand-dark);
+      border-radius: 999px; padding: 2px 10px; font-size: 12px; font-weight: 600; }
+
+    .results { display: grid; gap: 10px; }
+    .job, .row-card { background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+      padding: 14px 16px; box-shadow: var(--shadow); }
+    .job h3 { margin: 0 0 2px; font-size: 15px; }
+    .job h3 a, .row-card a.link { color: var(--brand-dark); text-decoration: none; }
+    .job h3 a:hover, a.link:hover { text-decoration: underline; }
+    .job .company { font-size: 13.5px; font-weight: 600; }
+    .meta { margin-top: 7px; display: flex; flex-wrap: wrap; gap: 7px; font-size: 12.5px; color: var(--muted); }
+    .tag { background: #f1f5f9; border: 1px solid var(--line); border-radius: 6px; padding: 2px 8px; }
+    .tag.remote { background: #e7f6ec; border-color: #bfe6cd; color: var(--good); }
+    .tag.hybrid { background: #fdf2e2; border-color: #f3dcb4; color: var(--amber); }
+
+    /* tables */
+    table { width: 100%; border-collapse: collapse; background: var(--card);
+      border: 1px solid var(--line); border-radius: 12px; overflow: hidden; box-shadow: var(--shadow); }
+    th, td { text-align: left; padding: 10px 14px; font-size: 13.5px; border-bottom: 1px solid var(--line); }
+    th { background: #f7fafc; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .4px; }
+    tr:last-child td { border-bottom: none; }
+    tr.clickable { cursor: pointer; }
+    tr.clickable:hover td { background: #f7fafc; }
+    .num-cell { font-variant-numeric: tabular-nums; }
+    .empty { text-align: center; color: var(--muted); padding: 36px 0; }
+
+    /* drawer */
+    .drawer-bg { position: fixed; inset: 0; background: rgba(16,38,60,.35); display: none; z-index: 20; }
+    .drawer-bg.open { display: block; }
+    .drawer { position: fixed; top: 0; right: 0; height: 100%; width: min(560px, 94vw);
+      background: var(--bg); box-shadow: -8px 0 30px rgba(16,38,60,.2); transform: translateX(100%);
+      transition: transform .2s ease; z-index: 21; overflow-y: auto; }
+    .drawer.open { transform: translateX(0); }
+    .drawer-head { background: var(--brand); color: #fff; padding: 16px 20px; position: sticky; top: 0; }
+    .drawer-head h2 { margin: 0; font-size: 18px; }
+    .drawer-head .sub { opacity: .9; font-size: 13px; margin-top: 2px; }
+    .drawer-close { position: absolute; top: 14px; right: 16px; background: rgba(255,255,255,.15);
+      color: #fff; border-radius: 6px; padding: 4px 9px; }
+    .drawer-body { padding: 18px 20px; display: grid; gap: 16px; }
+    .section h4 { margin: 0 0 8px; font-size: 12px; text-transform: uppercase; letter-spacing: .4px; color: var(--muted); }
+    .kv { display: grid; grid-template-columns: 120px 1fr; gap: 4px 12px; font-size: 13.5px; }
+    .kv dt { color: var(--muted); } .kv dd { margin: 0; }
+    .person { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
+    .person .nm { font-weight: 600; font-size: 14px; }
+    .person .hl { font-size: 12.5px; color: var(--muted); }
+    footer { text-align: center; color: var(--muted); font-size: 12px; padding: 24px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>LinkedIn Job Parser</h1>
+    <p>Search public LinkedIn jobs — discover companies hiring per role, and explore your saved data.</p>
+  </header>
+
+  <main class="wrap">
+    <div class="tabs">
+      <button class="tab active" data-tab="jobs">Jobs</button>
+      <button class="tab" data-tab="companies">Companies</button>
+      <button class="tab" data-tab="explore">Explore</button>
+    </div>
+
+    <!-- shared search card (jobs + companies tabs) -->
+    <section class="card" id="search-card">
+      <form id="search-form">
+        <div class="field kw">
+          <label for="keywords">Keywords *</label>
+          <input id="keywords" type="text" placeholder="e.g. python developer" required />
+        </div>
+        <div class="field loc">
+          <label for="location">Location</label>
+          <input id="location" type="text" placeholder="e.g. Berlin, Remote" />
+        </div>
+        <div class="field wt">
+          <label for="workplace_type">Workplace</label>
+          <select id="workplace_type">
+            <option value="">Any</option>
+            <option value="remote">Remote</option>
+            <option value="hybrid">Hybrid</option>
+            <option value="on_site">On-site</option>
+          </select>
+        </div>
+        <div class="field num">
+          <label for="max_results">Max results</label>
+          <input id="max_results" type="number" value="25" min="1" max="200" />
+        </div>
+        <div class="field det">
+          <label>Detail pages</label>
+          <div class="checkbox"><input id="details" type="checkbox" /><span>Fetch full details (slower)</span></div>
+        </div>
+        <div class="field go">
+          <label>&nbsp;</label>
+          <div class="actions">
+            <button type="submit" class="btn-primary" id="search-btn">Search</button>
+            <button type="button" class="btn-ghost" id="saved-btn">Show saved</button>
+          </div>
+        </div>
+      </form>
+      <div class="hint" id="search-hint"></div>
+    </section>
+
+    <div class="toolbar">
+      <div id="status" class="status"></div>
+      <div class="actions" id="export-bar"></div>
+    </div>
+
+    <div id="view"></div>
+  </main>
+
+  <!-- detail drawer -->
+  <div class="drawer-bg" id="drawer-bg"></div>
+  <aside class="drawer" id="drawer">
+    <div class="drawer-head">
+      <button class="drawer-close" id="drawer-close">✕ Close</button>
+      <h2 id="drawer-title">—</h2>
+      <div class="sub" id="drawer-sub"></div>
+    </div>
+    <div class="drawer-body" id="drawer-body"></div>
+  </aside>
+
+  <footer>linkedin-job-parser · public data only · for personal, low-volume use</footer>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const view = $("view"), statusEl = $("status"), exportBar = $("export-bar");
+    let activeTab = "jobs";
+
+    const esc = (s) => (s ?? "").toString().replace(/[&<>"']/g, (c) =>
+      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+    function setStatus(busy, msg) {
+      statusEl.innerHTML = busy ? `<span class="spinner"></span><span>${msg}</span>` : (msg || "");
+    }
+    async function api(path, opts) {
+      const res = await fetch(path, opts);
+      if (!res.ok) {
+        let d = res.statusText;
+        try { const j = await res.json(); d = JSON.stringify(j.detail ?? j); } catch (_) {}
+        throw new Error(d);
+      }
+      return res.json();
+    }
+    const HINTS = {
+      jobs: "⚠️ A live search hits LinkedIn's rate-limited public endpoint, so it can take a moment. Results are saved (deduped) to your database.",
+      companies: "Find the companies hiring for a role. Runs a search, then groups the listings by company. Use <b>Show saved</b> to browse without scraping.",
+    };
+
+    // ---------- tabs ----------
+    document.querySelectorAll(".tab").forEach((t) =>
+      t.addEventListener("click", () => switchTab(t.dataset.tab)));
+
+    function switchTab(name) {
+      activeTab = name;
+      document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("active", t.dataset.tab === name));
+      $("search-card").style.display = name === "explore" ? "none" : "block";
+      $("search-hint").innerHTML = HINTS[name] || "";
+      $("search-btn").textContent = name === "companies" ? "Find companies" : "Search";
+      exportBar.innerHTML = "";
+      view.innerHTML = "";
+      setStatus(false, "");
+      if (name === "explore") loadPositions();
+      else if (name === "companies") loadSavedCompanies();
+      else loadSavedJobs();
+    }
+
+    function exportButtons(entity) {
+      const kw = $("keywords").value.trim();
+      const q = kw ? `?keyword=${encodeURIComponent(kw)}` : "";
+      exportBar.innerHTML =
+        `<a class="btn-ghost btn-sm" href="/api/export/${entity}.csv${q}">⬇ CSV</a>` +
+        `<a class="btn-ghost btn-sm" href="/api/export/${entity}.json${q}">⬇ JSON</a>`;
+    }
+
+    // ---------- search form ----------
+    $("search-form").addEventListener("submit", (e) => { e.preventDefault(); runSearch(); });
+    $("saved-btn").addEventListener("click", () =>
+      activeTab === "companies" ? loadSavedCompanies() : loadSavedJobs());
+
+    function searchBody() {
+      return {
+        keywords: $("keywords").value.trim(),
+        location: $("location").value.trim() || null,
+        workplace_type: $("workplace_type").value || null,
+        max_results: Number($("max_results").value) || 25,
+        details: $("details").checked,
+      };
+    }
+
+    async function runSearch() {
+      const body = searchBody();
+      if (!body.keywords) return;
+      const companies = activeTab === "companies";
+      setStatus(true, companies ? "Searching companies… this can take a moment." : "Searching LinkedIn… this can take a moment.");
+      view.innerHTML = "";
+      try {
+        const data = await api(companies ? "/api/companies/search" : "/api/search", {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+        });
+        if (companies) {
+          setStatus(false, `<span class="pill">${data.count} companies</span> ${data.new_companies} new · saved.`);
+          renderCompanies(data.companies);
+          exportButtons("companies");
+        } else {
+          setStatus(false, `<span class="pill">${data.count} jobs</span> ${data.new_count} new · ${data.new_companies} new companies · saved.`);
+          renderJobs(data.jobs);
+          exportButtons("listings");
+        }
+      } catch (err) { setStatus(false, `❌ ${esc(err.message)}`); }
+    }
+
+    // ---------- jobs ----------
+    async function loadSavedJobs() {
+      setStatus(true, "Loading saved jobs…");
+      try {
+        const kw = $("keywords").value.trim();
+        const data = await api("/api/export/listings.json" + (kw ? `?keyword=${encodeURIComponent(kw)}` : ""));
+        // listings.json returns a flat array
+        setStatus(false, `<span class="pill">${data.length} saved jobs</span> from your database.`);
+        renderJobs(data);
+        exportButtons("listings");
+      } catch (err) { setStatus(false, `❌ ${esc(err.message)}`); }
+    }
+
+    function renderJobs(jobs) {
+      if (!jobs.length) { view.innerHTML = `<div class="empty">No jobs to show. Run a search above.</div>`; return; }
+      const html = jobs.map((j) => {
+        const title = j.url ? `<a href="${esc(j.url)}" target="_blank" rel="noopener">${esc(j.title)}</a>` : esc(j.title);
+        const company = j.company_url
+          ? `<a class="link" href="${esc(j.company_url)}" target="_blank" rel="noopener">${esc(j.company)}</a>` : esc(j.company);
+        const wt = j.workplace_type, tags = [];
+        if (j.posted_at) tags.push(`<span class="tag">📅 ${esc(j.posted_at)}</span>`);
+        if (j.location) tags.push(`<span class="tag">📍 ${esc(j.location)}</span>`);
+        if (wt) tags.push(`<span class="tag ${wt}">${esc(wt.replace("_", "-"))}</span>`);
+        if (j.seniority) tags.push(`<span class="tag">${esc(j.seniority)}</span>`);
+        if (j.applicant_count != null) tags.push(`<span class="tag">👥 ${j.applicant_count}</span>`);
+        return `<article class="job"><h3>${title}</h3><div class="company">${company}</div>
+          <div class="meta">${tags.join("")}</div></article>`;
+      }).join("");
+      view.innerHTML = `<div class="results">${html}</div>`;
+    }
+
+    // ---------- companies ----------
+    async function loadSavedCompanies() {
+      setStatus(true, "Loading saved companies…");
+      try {
+        const kw = $("keywords").value.trim();
+        const data = await api("/api/companies" + (kw ? `?keyword=${encodeURIComponent(kw)}` : ""));
+        setStatus(false, `<span class="pill">${data.count} companies</span> from your database.`);
+        renderCompanies(data.companies);
+        exportButtons("companies");
+      } catch (err) { setStatus(false, `❌ ${esc(err.message)}`); }
+    }
+
+    function renderCompanies(companies) {
+      if (!companies.length) { view.innerHTML = `<div class="empty">No companies yet. Use the Companies search above.</div>`; return; }
+      const rows = companies.map((c) => `
+        <tr class="clickable" data-company="${c.id}">
+          <td><b>${esc(c.name)}</b>${c.industry ? `<div style="color:var(--muted);font-size:12px">${esc(c.industry)}</div>` : ""}</td>
+          <td class="num-cell">${c.listing_count}</td>
+          <td>${esc(c.location || "—")}</td>
+          <td>${c.company_url ? `<a class="link" href="${esc(c.company_url)}" target="_blank" rel="noopener" onclick="event.stopPropagation()">LinkedIn ↗</a>` : "—"}</td>
+          <td><button class="btn-ghost btn-sm" data-view="${c.id}">View</button></td>
+        </tr>`).join("");
+      view.innerHTML = `<table><thead><tr><th>Company</th><th>Open listings</th><th>Location</th><th>Profile</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
+      view.querySelectorAll("[data-company]").forEach((tr) =>
+        tr.addEventListener("click", () => openCompany(tr.dataset.company)));
+    }
+
+    // ---------- explore ----------
+    async function loadPositions() {
+      setStatus(true, "Loading positions…");
+      try {
+        const data = await api("/api/positions");
+        setStatus(false, `<span class="pill">${data.count} positions</span> you've searched. Click one to see who's hiring.`);
+        if (!data.positions.length) { view.innerHTML = `<div class="empty">No saved positions yet. Run a search on the Jobs tab.</div>`; return; }
+        const rows = data.positions.map((p) => `
+          <tr class="clickable" data-pos="${p.id}" data-label="${esc(p.keyword)}${p.location ? " · " + esc(p.location) : ""}">
+            <td><b>${esc(p.keyword)}</b></td>
+            <td>${esc(p.location || "—")}</td>
+            <td class="num-cell">${p.company_count}</td>
+            <td class="num-cell">${p.listing_count}</td>
+          </tr>`).join("");
+        view.innerHTML = `<table><thead><tr><th>Position</th><th>Location</th><th>Companies</th><th>Listings</th></tr></thead><tbody>${rows}</tbody></table>
+          <div id="explore-companies" style="margin-top:18px"></div>`;
+        view.querySelectorAll("[data-pos]").forEach((tr) =>
+          tr.addEventListener("click", () => loadPositionCompanies(tr.dataset.pos, tr.dataset.label)));
+      } catch (err) { setStatus(false, `❌ ${esc(err.message)}`); }
+    }
+
+    async function loadPositionCompanies(posId, label) {
+      const target = $("explore-companies");
+      target.innerHTML = `<div class="status"><span class="spinner"></span><span>Loading companies…</span></div>`;
+      try {
+        const data = await api(`/api/positions/${posId}/companies`);
+        const rows = data.companies.map((c) => `
+          <tr class="clickable" data-company="${c.id}">
+            <td><b>${esc(c.name)}</b></td><td class="num-cell">${c.listing_count}</td>
+            <td>${esc(c.location || "—")}</td>
+            <td><button class="btn-ghost btn-sm" data-view="${c.id}">View</button></td>
+          </tr>`).join("");
+        target.innerHTML = `<h3 style="font-size:15px;margin:0 0 8px">Companies hiring for “${esc(label)}” (${data.count})</h3>
+          <table><thead><tr><th>Company</th><th>Listings</th><th>Location</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
+        target.querySelectorAll("[data-company]").forEach((tr) =>
+          tr.addEventListener("click", () => openCompany(tr.dataset.company)));
+      } catch (err) { target.innerHTML = `❌ ${esc(err.message)}`; }
+    }
+
+    // ---------- drawer (company / listing detail) ----------
+    const drawer = $("drawer"), drawerBg = $("drawer-bg");
+    function closeDrawer() { drawer.classList.remove("open"); drawerBg.classList.remove("open"); }
+    $("drawer-close").addEventListener("click", closeDrawer);
+    drawerBg.addEventListener("click", closeDrawer);
+
+    function openDrawer(title, sub) {
+      $("drawer-title").textContent = title;
+      $("drawer-sub").textContent = sub || "";
+      $("drawer-body").innerHTML = `<div class="status"><span class="spinner"></span><span>Loading…</span></div>`;
+      drawer.classList.add("open"); drawerBg.classList.add("open");
+    }
+
+    let currentCompany = null;
+    async function openCompany(id) {
+      openDrawer("Company", "");
+      try {
+        const data = await api(`/api/companies/${id}`);
+        currentCompany = data.company;
+        renderCompanyDrawer(data);
+      } catch (err) { $("drawer-body").innerHTML = `❌ ${esc(err.message)}`; }
+    }
+
+    function renderCompanyDrawer(data) {
+      const c = data.company;
+      $("drawer-title").textContent = c.name;
+      $("drawer-sub").textContent = `${c.listing_count} open listing(s)`;
+      const facts = [
+        ["Industry", c.industry], ["Size", c.company_size], ["Location", c.location],
+        ["Website", c.website ? `<a class="link" href="${esc(c.website)}" target="_blank" rel="noopener">${esc(c.website)}</a>` : null],
+        ["LinkedIn", c.company_url ? `<a class="link" href="${esc(c.company_url)}" target="_blank" rel="noopener">Profile ↗</a>` : null],
+      ].filter(([, v]) => v);
+      const factsHtml = facts.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("");
+      const listings = data.listings.map((j) =>
+        `<div class="person"><div class="nm">${j.url ? `<a class="link" href="${esc(j.url)}" target="_blank" rel="noopener">${esc(j.title)}</a>` : esc(j.title)}</div>
+          <div class="hl">${esc(j.location || "")}${j.posted_at ? " · " + esc(j.posted_at) : ""}</div></div>`).join("") || `<div class="hl">No listings stored.</div>`;
+      const people = data.people.length
+        ? data.people.map((p) => `<div class="person"><div class="nm">${p.profile_url ? `<a class="link" href="${esc(p.profile_url)}" target="_blank" rel="noopener">${esc(p.name)}</a>` : esc(p.name)}</div>
+            <div class="hl">${esc(p.headline || p.keyword || "")}</div></div>`).join("")
+        : `<div class="hl" id="people-note">No leaders found yet.</div>`;
+      $("drawer-body").innerHTML = `
+        <div class="section"><div class="actions">
+          <button class="btn-ghost btn-sm" id="btn-enrich">↻ Enrich company</button>
+          <button class="btn-ghost btn-sm" id="btn-people">🔎 Find leaders (CEO/Founder)</button>
+        </div></div>
+        ${c.description ? `<div class="section"><h4>About</h4><div style="font-size:13.5px">${esc(c.description)}</div></div>` : ""}
+        ${factsHtml ? `<div class="section"><h4>Details</h4><dl class="kv">${factsHtml}</dl></div>` : ""}
+        <div class="section"><h4>People (CEO / Founders)</h4><div class="results" id="people-list">${people}</div></div>
+        <div class="section"><h4>Open listings (${data.listings.length})</h4><div class="results">${listings}</div></div>`;
+      $("btn-enrich").addEventListener("click", () => enrichCompany(c.id));
+      $("btn-people").addEventListener("click", () => findLeaders(c.id));
+    }
+
+    async function enrichCompany(id) {
+      const btn = $("btn-enrich"); btn.disabled = true; btn.textContent = "Enriching…";
+      try {
+        const data = await api(`/api/companies/${id}/enrich`, { method: "POST" });
+        const full = await api(`/api/companies/${id}`);
+        renderCompanyDrawer(full);
+        if (data.note) $("drawer-body").insertAdjacentHTML("afterbegin", `<div class="hint">${esc(data.note)}</div>`);
+      } catch (err) { btn.disabled = false; btn.textContent = "↻ Enrich company"; alert(err.message); }
+    }
+
+    async function findLeaders(id) {
+      const btn = $("btn-people"); btn.disabled = true; btn.textContent = "Searching…";
+      try {
+        const data = await api(`/api/companies/${id}/people`, { method: "POST" });
+        const full = await api(`/api/companies/${id}`);
+        renderCompanyDrawer(full);
+        if (data.note) $("people-list").insertAdjacentHTML("beforebegin", `<div class="hint">${esc(data.note)}</div>`);
+      } catch (err) { btn.disabled = false; btn.textContent = "🔎 Find leaders (CEO/Founder)"; alert(err.message); }
+    }
+
+    // initial load
+    switchTab("jobs");
+  </script>
+</body>
+</html>

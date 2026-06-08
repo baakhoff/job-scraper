@@ -35,7 +35,9 @@ COPY --from=builder /usr/local/lib/python3.12/site-packages \
 WORKDIR /app
 
 # Top-level entry modules are not part of the wheel, so copy them explicitly.
-COPY main.py config.py ./
+COPY main.py config.py web.py ./
+# The web UI's HTML template is served at runtime by web.py (FileResponse).
+COPY templates ./templates
 COPY docker/ ./docker/
 
 # Non-root user. /data is the DB volume mount point and must be writable by it;

@@ -1,0 +1,97 @@
+"""Tests for the web JSON API against a temp-SQLite database (offline).
+
+Endpoints that hit the network (live search, company enrich, people scrape) are
+not exercised here; we seed the DB directly and assert the read/export routes
+plus the graceful "people search disabled" path.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from collections.abc import Iterator
+from pathlib import Path
+
+import pytest
+from starlette.testclient import TestClient
+
+from src.models import JobListing
+from src.storage import Storage
+
+
+@pytest.fixture
+def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
+    """A TestClient whose endpoints use a freshly-seeded temp SQLite DB."""
+    db = (tmp_path / "web.db").as_posix()
+    monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{db}")
+
+    async def seed() -> None:
+        async with Storage() as storage:
+            await storage.save_search_results(
+                [
+                    JobListing(
+                        job_id="1", title="Python Dev", company="Acme",
+                        company_url="https://www.linkedin.com/company/acme",
+                    ),
+                    JobListing(
+                        job_id="2", title="Backend", company="Globex",
+                        company_url="https://www.linkedin.com/company/globex",
+                    ),
+                ],
+                keyword="Python",
+                location="Berlin",
+            )
+
+    asyncio.run(seed())
+
+    import web
+
+    with TestClient(web.app) as test_client:
+        yield test_client
+
+
+def test_positions_endpoint(client: TestClient) -> None:
+    data = client.get("/api/positions").json()
+    assert data["count"] == 1
+    position = data["positions"][0]
+    assert position["keyword"] == "Python"
+    assert position["company_count"] == 2
+    assert position["listing_count"] == 2
+
+
+def test_position_companies_and_company_detail(client: TestClient) -> None:
+    position_id = client.get("/api/positions").json()["positions"][0]["id"]
+    companies = client.get(f"/api/positions/{position_id}/companies").json()
+    assert companies["count"] == 2
+
+    company_id = companies["companies"][0]["id"]
+    detail = client.get(f"/api/companies/{company_id}").json()
+    assert detail["company"]["listing_count"] == 1
+    assert len(detail["listings"]) == 1
+    assert detail["people"] == []
+
+
+def test_people_endpoint_disabled_by_default(client: TestClient) -> None:
+    company_id = client.get("/api/companies").json()["companies"][0]["id"]
+    data = client.post(f"/api/companies/{company_id}/people").json()
+    assert data["count"] == 0
+    assert "disabled" in data["note"].lower()
+
+
+def test_export_listings_csv(client: TestClient) -> None:
+    res = client.get("/api/export/listings.csv")
+    assert res.status_code == 200
+    assert res.headers["content-disposition"] == 'attachment; filename="listings.csv"'
+    lines = res.text.splitlines()
+    assert lines[0].startswith("job_id,title,company")
+    assert len(lines) == 3  # header + 2 rows
+
+
+def test_export_companies_json(client: TestClient) -> None:
+    res = client.get("/api/export/companies.json")
+    assert res.status_code == 200
+    names = {row["name"] for row in res.json()}
+    assert names == {"Acme", "Globex"}
+
+
+def test_unknown_export_entity_404(client: TestClient) -> None:
+    assert client.get("/api/export/widgets.csv").status_code == 404

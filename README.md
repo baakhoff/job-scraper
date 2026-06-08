@@ -5,6 +5,15 @@ data. No login or LinkedIn account is used — the tool hits LinkedIn's public
 guest jobs endpoint, parses the returned HTML job cards, and stores normalized
 records in a database (PostgreSQL under Docker; SQLite for zero-setup local use).
 
+Data is stored **relationally**, so you can move between roles, the companies
+hiring for them, and (best-effort) those companies' leadership:
+
+```
+Position ──< Listings          (the "pages" found for a role)
+Position >──< Companies         (companies hiring for that role)
+Company  ──< People (CEO/Founder, best-effort — see caveat below)
+```
+
 ## Pipeline
 
 ```
@@ -12,8 +21,30 @@ SearchParams ─▶ scraper (httpx, async, paginated)
             ─▶ parser  (BeautifulSoup HTML → raw dicts)
             ─▶ models  (validate/normalize → JobListing)
             ─▶ filters (keywords, workplace type, dedupe)
-            ─▶ storage (PostgreSQL / SQLite via async SQLAlchemy)
+            ─▶ storage (Positions · Companies · Listings · People,
+                         deduped, PostgreSQL / SQLite via async SQLAlchemy)
 ```
+
+## Web UI
+
+The browser UI (`web.py` + `templates/index.html`) has three tabs:
+
+- **Jobs** — search and browse listings (saved, deduped, to the DB).
+- **Companies** — discover the companies hiring for a role, with per-company
+  **Enrich** (fetch the public company page) and **Find leaders** (CEO/Founder)
+  actions.
+- **Explore** — drill the stored data: Position → Companies → a Company's
+  listings and people.
+
+Every table has **CSV / JSON export** buttons (also at `GET /api/export/{listings|companies|people}.{csv|json}`).
+
+> ⚠️ **CEO / Founder discovery is best-effort and OFF by default.** LinkedIn's
+> public *people* search is generally login-gated, so the default provider finds
+> nothing and the UI says so. Enable the best-effort scrape with
+> `LJP_PEOPLE_SEARCH_ENABLED=true` + `LJP_PEOPLE_PROVIDER=linkedin` (results not
+> guaranteed). It's built behind a provider interface (`src/people.py`) so a real
+> data source can be dropped in later. Company-page enrichment is similarly
+> best-effort and selector-fragile.
 
 ## Usage
 
@@ -70,13 +101,28 @@ service.
 
 A multi-stage `Dockerfile` (python:3.12-slim, deps installed with `uv`,
 non-root user) and a `docker-compose.yml` that bundles a **PostgreSQL 16**
-service ship with the project. The `parser`/`scheduler` workers wait for
-Postgres to be healthy (`depends_on: service_healthy`) and connect to it over
-the compose network. Copy the env template first:
+service ship with the project. The `web` / `parser` / `scheduler` workers wait
+for Postgres to be healthy (`depends_on: service_healthy`) and connect to it
+over the compose network. Copy the env template first:
 
 ```bash
 cp .env.example .env   # edit LJP_* / POSTGRES_* values to taste
 ```
+
+### Web UI
+
+The quickest way to use the tool — build and start the browser UI plus its
+database:
+
+```bash
+docker compose up -d --build web
+```
+
+Then open **http://127.0.0.1:8000** (change the port with `LJP_WEB_PORT`). The
+UI is bound to `127.0.0.1`, so it's reachable from this machine only. Stop it
+with `docker compose down` (add `-v` to also wipe the database volumes).
+
+### CLI in Docker
 
 ```bash
 # Build the image

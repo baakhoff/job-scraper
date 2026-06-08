@@ -4,7 +4,13 @@ from __future__ import annotations
 
 from bs4 import BeautifulSoup
 
-from src.parser import parse_card, parse_detail_html, parse_search_html
+from src.parser import (
+    parse_card,
+    parse_company_html,
+    parse_detail_html,
+    parse_people_html,
+    parse_search_html,
+)
 
 SAMPLE = """
 <li>
@@ -115,3 +121,69 @@ def test_job_id_falls_back_to_link_when_no_urn() -> None:
     raw = parse_card(card)
     assert raw is not None
     assert raw["job_id"] == "4012345678"
+
+
+COMPANY_SAMPLE = """
+<html><head>
+  <meta property="og:title" content="Acme GmbH" />
+  <meta property="og:description" content="We build delightful widgets." />
+</head><body>
+  <section class="about-us">
+    <dl>
+      <dt>Industry</dt><dd>Software Development</dd>
+      <dt>Company size</dt><dd>201-500 employees</dd>
+      <dt>Website</dt><dd>https://acme.example</dd>
+      <dt>Headquarters</dt><dd>Berlin, Germany</dd>
+    </dl>
+  </section>
+</body></html>
+"""
+
+
+def test_parse_company_html_reads_meta_and_facts() -> None:
+    data = parse_company_html(COMPANY_SAMPLE)
+    assert data["name"] == "Acme GmbH"
+    assert data["description"] == "We build delightful widgets."
+    assert data["industry"] == "Software Development"
+    assert data["company_size"] == "201-500 employees"
+    assert data["website"] == "https://acme.example"
+    assert data["headquarters"] == "Berlin, Germany"
+
+
+def test_parse_company_html_tolerates_missing_fields() -> None:
+    data = parse_company_html("<html><body>nothing</body></html>")
+    assert data["name"] is None
+    assert data["industry"] is None
+
+
+PEOPLE_SAMPLE = """
+<ul>
+  <li>
+    <a href="https://www.linkedin.com/in/jane-doe?trk=x">Jane Doe</a>
+    <p class="entity-result__primary-subtitle">CEO &amp; Founder at Acme</p>
+  </li>
+  <li>
+    <a href="https://www.linkedin.com/in/john-roe">John Roe</a>
+    <div class="subline-level-1">Co-Founder</div>
+  </li>
+  <li><a href="https://www.linkedin.com/in/jane-doe">Jane Doe (dup)</a></li>
+  <li><a href="https://www.linkedin.com/jobs/view/123">Not a profile</a></li>
+</ul>
+"""
+
+
+def test_parse_people_html_extracts_profiles_and_dedupes() -> None:
+    people = parse_people_html(PEOPLE_SAMPLE)
+    urls = [p["profile_url"] for p in people]
+    # Tracking stripped, deduped by profile URL, non-profile link ignored.
+    assert urls == [
+        "https://www.linkedin.com/in/jane-doe",
+        "https://www.linkedin.com/in/john-roe",
+    ]
+    assert people[0]["name"] == "Jane Doe"
+    assert "CEO" in str(people[0]["headline"])
+
+
+def test_parse_people_html_empty_on_authwall() -> None:
+    # A guest people page with no profile links (typical authwall) -> nothing.
+    assert parse_people_html("<html><body>Sign in to continue</body></html>") == []

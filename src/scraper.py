@@ -26,6 +26,13 @@ GUEST_SEARCH_URL = "https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPosti
 # Per-job detail fragment served to logged-out users (full description, job
 # criteria, applicant count). One request per job — gate it behind the limiter.
 GUEST_DETAIL_URL = "https://www.linkedin.com/jobs-guest/jobs/api/jobPosting/{job_id}"
+# Public company page (best-effort enrichment). Logged-out access is sparse and
+# may authwall; the parser falls back to OpenGraph meta tags.
+COMPANY_URL = "https://www.linkedin.com/company/{slug}/"
+# People search. NOTE: LinkedIn's people search is generally login-gated, so a
+# guest request here usually returns an auth wall (no profiles). This exists so
+# a real provider/source can be swapped in; see src/people.py.
+PEOPLE_SEARCH_URL = "https://www.linkedin.com/search/results/people/"
 # Initial offset step / fallback only. The endpoint's real page size drifts
 # (observed ~10, historically 25), so ``iter_pages`` advances ``start`` by the
 # number of cards actually returned rather than trusting this constant. See
@@ -210,4 +217,51 @@ class LinkedInScraper:
             return response.text
 
         log.error("detail_max_retries_exceeded", job_id=job_id)
+        return ""
+
+    async def fetch_company(self, slug: str) -> str:
+        """Fetch a public company page's HTML (or ``""`` on failure/authwall).
+
+        Best-effort enrichment source. The caller should space calls via the
+        rate limiter. Returns ``""`` on a blocked/unavailable terminal state so
+        enrichment degrades silently rather than raising.
+        """
+        return await self._get_text(COMPANY_URL.format(slug=slug), context="company", key=slug)
+
+    async def search_people(self, query: str) -> str:
+        """Fetch a people-search results page for ``query`` (or ``""``).
+
+        Public people search is usually login-gated, so this commonly returns an
+        auth wall with no profiles — that's expected and handled by the caller
+        (treated as "no people found"). Kept behind ``src/people.py`` so a real
+        data source can replace it without touching the rest of the pipeline.
+        """
+        url = httpx.URL(PEOPLE_SEARCH_URL, params={"keywords": query})
+        return await self._get_text(str(url), context="people", key=query)
+
+    async def _get_text(self, url: str, *, context: str, key: str) -> str:
+        """Shared GET with retry/backoff used by the best-effort fetchers above.
+
+        Mirrors :meth:`fetch_detail`'s policy: retry on 429 and transient
+        network errors; treat 400/404/999 (LinkedIn's bot-block code) as a clean
+        "unavailable" returning ``""``.
+        """
+        for attempt in range(self.max_retries):
+            try:
+                response = await self._client.get(url, headers=self._headers())
+            except httpx.TransportError as exc:
+                log.warning(f"{context}_request_failed", key=key, error=str(exc), attempt=attempt)
+                await self.rate_limiter.backoff(attempt)
+                continue
+
+            if response.status_code == 429:
+                await self.rate_limiter.backoff(attempt)
+                continue
+            if response.status_code in (400, 404, 999):
+                log.info(f"{context}_unavailable", key=key, status=response.status_code)
+                return ""
+            response.raise_for_status()
+            return response.text
+
+        log.error(f"{context}_max_retries_exceeded", key=key)
         return ""

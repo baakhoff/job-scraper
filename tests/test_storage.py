@@ -113,3 +113,101 @@ async def test_update_preserves_detail_fields_on_search_only_pass(storage: Stora
     assert job.title == "Updated Title"
     assert job.description == "Rich detail."
     assert job.applicant_count == 42
+
+
+# --------------------------------------------------------------------------- #
+# Relational model: positions, companies, people                              #
+# --------------------------------------------------------------------------- #
+_ACME = "https://www.linkedin.com/company/acme"
+_GLOBEX = "https://www.linkedin.com/company/globex"
+
+
+async def test_save_search_results_links_positions_and_companies(storage: Storage) -> None:
+    jobs = [
+        _job("1", company="Acme", company_url=_ACME),
+        _job("2", company="Acme", company_url=_ACME),
+        _job("3", company="Globex", company_url=_GLOBEX),
+    ]
+    result = await storage.save_search_results(jobs, keyword="Python", location="Berlin")
+    assert result["new_listings"] == 3
+    assert result["new_companies"] == 2
+
+    (position,) = await storage.get_positions()
+    assert position.keyword == "Python"
+    assert position.company_count == 2
+    assert position.listing_count == 3
+    assert position.id is not None
+
+    companies = await storage.get_companies_for_position(position.id)
+    # Sorted by listing count desc: Acme (2) before Globex (1).
+    assert [(c.name, c.listing_count) for c in companies] == [("Acme", 2), ("Globex", 1)]
+
+
+async def test_save_search_results_dedupes_on_rerun(storage: Storage) -> None:
+    jobs = [_job("1", company="Acme", company_url=_ACME)]
+    first = await storage.save_search_results(jobs, keyword="Python")
+    second = await storage.save_search_results(jobs, keyword="Python")
+    assert first["new_listings"] == 1 and first["new_companies"] == 1
+    # Re-running the same search inserts nothing new.
+    assert second["new_listings"] == 0 and second["new_companies"] == 0
+    assert len(await storage.get_positions()) == 1
+    assert len(await storage.get_companies()) == 1
+
+
+async def test_company_dedupe_prefers_slug(storage: Storage) -> None:
+    # Same slug, differently-cased name => one company.
+    await storage.save_search_results(
+        [_job("1", company="Acme Inc", company_url=_ACME)], keyword="a"
+    )
+    await storage.save_search_results(
+        [_job("2", company="ACME", company_url=_ACME + "?trk=x")], keyword="b"
+    )
+    companies = await storage.get_companies()
+    assert len(companies) == 1
+    assert companies[0].slug == "acme"
+
+
+async def test_company_view_returns_listings_and_people(storage: Storage) -> None:
+    from src.models import CompanyPerson
+
+    await storage.save_search_results(
+        [_job("1", company="Acme", company_url=_ACME)], keyword="Python"
+    )
+    (company,) = await storage.get_companies()
+    assert company.id is not None
+    new = await storage.upsert_company_people(
+        company.id,
+        [CompanyPerson(name="Jane Doe", headline="CEO", keyword="CEO")],
+    )
+    assert new == 1
+    # Dedupe: same person again => no new row.
+    assert await storage.upsert_company_people(company.id, [CompanyPerson(name="Jane Doe")]) == 0
+
+    people = await storage.get_people_for_company(company.id)
+    assert [p.name for p in people] == ["Jane Doe"]
+    listings = await storage.get_listings_for_company(company.id)
+    assert [j.job_id for j in listings] == ["1"]
+
+
+async def test_backfill_links_legacy_listings_to_companies(storage: Storage) -> None:
+    # Simulate legacy data: rows saved via the old flat path (no company_id).
+    await storage.save_jobs([_job("1", company="Acme", company_url=_ACME)])
+    # A fresh init runs the backfill.
+    await storage.init_db()
+    companies = await storage.get_companies()
+    assert [c.name for c in companies] == ["Acme"]
+    assert companies[0].listing_count == 1
+
+
+async def test_update_company_patches_enrichment(storage: Storage) -> None:
+    await storage.save_search_results(
+        [_job("1", company="Acme", company_url=_ACME)], keyword="Python"
+    )
+    (company,) = await storage.get_companies()
+    assert company.id is not None
+    updated = await storage.update_company(
+        company.id, industry="Software", website="https://acme.example"
+    )
+    assert updated is not None
+    assert updated.industry == "Software"
+    assert updated.website == "https://acme.example"

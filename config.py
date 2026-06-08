@@ -46,6 +46,18 @@ class Config(BaseSettings):
     # --- output ---
     db_path: str = "output/jobs.db"
 
+    # --- enrichment & people discovery ---
+    # Whether the Companies/Explore flows may fetch public company pages to fill
+    # in industry/size/website/description. Best-effort and selector-fragile.
+    company_enrich_enabled: bool = True
+    # CEO/Founder discovery. OFF by default: LinkedIn's public people search is
+    # generally login-gated, so the default provider returns nothing. Set the
+    # provider to "linkedin" to attempt the best-effort scrape anyway.
+    people_search_enabled: bool = False
+    people_provider: str = "null"  # one of: "null", "linkedin"
+    # Keywords used to find leadership when searching people at a company.
+    people_search_keywords: list[str] = ["CEO", "Founder", "Co-Founder", "Owner"]
+
     # --- database ---
     # SQLAlchemy URL for the persistence layer. Defaults to a local async SQLite
     # file for bare-CLI use; Docker overrides this with a Postgres asyncpg URL via

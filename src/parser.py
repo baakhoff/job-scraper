@@ -38,6 +38,25 @@ DETAIL_CRITERIA_HEADER_SELECTOR = "h3.description__job-criteria-subheader"
 DETAIL_CRITERIA_VALUE_SELECTOR = "span.description__job-criteria-text"
 DETAIL_COMPANY_LINK_SELECTOR = "a.topcard__org-name-link"
 DETAIL_APPLICANTS_RE = re.compile(r"([\d,]+)\s+applicants?", re.IGNORECASE)
+
+# Company "about" page selectors (linkedin.com/company/{slug}). Logged-out
+# company pages are sparse and often fall back to OpenGraph <meta> tags, so we
+# read those first and treat the visible DOM as a best-effort supplement.
+COMPANY_NAME_SELECTOR = "h1.top-card-layout__title, h1.org-top-card-summary__title"
+COMPANY_DESC_SELECTOR = (
+    "p.about-us__description, section.about-us p, div.core-section-container__content p"
+)
+# The about page renders facts as <dt>label</dt><dd>value</dd> pairs.
+COMPANY_DEFINITION_SELECTOR = "div.about-us__basic-info-container dl, section.about-us dl"
+
+# People search/result cards (best-effort; public people search is login-gated,
+# so this also handles generic profile-link result pages). Any anchor to a
+# /in/{slug} profile is treated as a person card.
+PEOPLE_PROFILE_LINK_SELECTOR = "a[href*='/in/']"
+PEOPLE_HEADLINE_SELECTOR = (
+    "p.people-search-card__headline, p.entity-result__primary-subtitle, "
+    "div.subline-level-1"
+)
 # The card root carries the job id in a data attribute; a couple of variants
 # have shipped over time, so try each.
 ENTITY_URN_ATTRS = ("data-entity-urn", "data-id")
@@ -133,6 +152,94 @@ def parse_detail_html(html: str) -> dict[str, object]:
         "applicant_count": applicant_count,
         "company_url": _href_soup(soup, DETAIL_COMPANY_LINK_SELECTOR),
     }
+
+
+def parse_company_html(html: str) -> dict[str, object]:
+    """Parse a public company page into a best-effort enrichment dict.
+
+    Logged-out company pages are sparse and version-dependent, so this reads
+    OpenGraph ``<meta>`` tags first (the most stable signal) and supplements
+    with visible DOM where present. Returns ``{name, description, industry,
+    company_size, website, headquarters}`` with ``None`` for anything missing.
+
+    NOTE: like the job selectors, these are fragile and may need updating when
+    LinkedIn ships markup changes; missing fields are expected, not errors.
+    """
+    soup = BeautifulSoup(html, "lxml")
+
+    name = _meta(soup, "og:title") or _text_soup(soup, COMPANY_NAME_SELECTOR)
+    description = _meta(soup, "og:description") or _text_soup(soup, COMPANY_DESC_SELECTOR)
+
+    # Pull label -> value pairs out of any about-page definition list.
+    facts: dict[str, str] = {}
+    for dl in soup.select(COMPANY_DEFINITION_SELECTOR):
+        if not isinstance(dl, Tag):
+            continue
+        terms = dl.find_all("dt")
+        values = dl.find_all("dd")
+        for term, value in zip(terms, values, strict=False):
+            if isinstance(term, Tag) and isinstance(value, Tag):
+                facts[term.get_text(strip=True).lower()] = value.get_text(" ", strip=True)
+
+    return {
+        "name": name,
+        "description": description,
+        "industry": facts.get("industry") or facts.get("industries"),
+        "company_size": facts.get("company size") or facts.get("size"),
+        "website": facts.get("website") or _meta(soup, "og:url"),
+        "headquarters": facts.get("headquarters"),
+    }
+
+
+def parse_people_html(html: str) -> list[dict[str, object]]:
+    """Parse a people-results page into a list of ``{name, headline, profile_url}``.
+
+    Best-effort and deliberately loose: any anchor pointing at a ``/in/{slug}``
+    profile is treated as a person card, deduped by profile URL. Public people
+    search is generally login-gated, so on a guest page this often returns an
+    empty list — which the caller treats as "no leaders found", not an error.
+    """
+    soup = BeautifulSoup(html, "lxml")
+    people: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for link in soup.select(PEOPLE_PROFILE_LINK_SELECTOR):
+        if not isinstance(link, Tag):
+            continue
+        href = link.get("href")
+        if not isinstance(href, str) or "/in/" not in href:
+            continue
+        profile_url = href.split("?", 1)[0]
+        if profile_url in seen:
+            continue
+        name = link.get_text(strip=True)
+        if not name:
+            continue
+        seen.add(profile_url)
+        # The headline usually sits in a sibling/parent subtitle element.
+        headline = None
+        container = link.find_parent(["li", "div"])
+        if isinstance(container, Tag):
+            headline = _text(container, PEOPLE_HEADLINE_SELECTOR)
+        people.append({"name": name, "headline": headline, "profile_url": profile_url})
+    return people
+
+
+def _meta(soup: BeautifulSoup, prop: str) -> str | None:
+    """Return the ``content`` of an OpenGraph/standard ``<meta>`` tag, or ``None``."""
+    el = soup.find("meta", attrs={"property": prop}) or soup.find("meta", attrs={"name": prop})
+    if not isinstance(el, Tag):
+        return None
+    content = el.get("content")
+    return content.strip() if isinstance(content, str) and content.strip() else None
+
+
+def _text_soup(soup: BeautifulSoup, selector: str) -> str | None:
+    """``_text`` against a whole-document soup (pages, not a single card)."""
+    el = soup.select_one(selector)
+    if not isinstance(el, Tag):
+        return None
+    text = el.get_text(" ", strip=True)
+    return text or None
 
 
 def _extract_job_id(card: Tag) -> str | None:
