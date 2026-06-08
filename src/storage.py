@@ -611,6 +611,17 @@ class Storage:
             ).all()
             return [rec.to_listing() for rec in records]
 
+    async def get_listings_for_position(self, position_id: int) -> list[JobListing]:
+        """Return all listings saved under a position, newest-first."""
+        stmt = (
+            select(JobRecord)
+            .where(JobRecord.position_id == position_id)
+            .order_by(JobRecord.posted_at.desc().nullslast())
+        )
+        async with self._session() as session:
+            rows: Sequence[JobRecord] = (await session.scalars(stmt)).all()
+            return [row.to_listing() for row in rows]
+
     async def get_listing(self, job_id: str) -> JobListing | None:
         """A single listing by ``job_id``, or ``None``."""
         async with self._session() as session:
