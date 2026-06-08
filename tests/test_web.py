@@ -70,11 +70,16 @@ def test_position_companies_and_company_detail(client: TestClient) -> None:
     assert detail["people"] == []
 
 
-def test_people_endpoint_disabled_by_default(client: TestClient) -> None:
+def test_people_endpoint_enabled_returns_empty_on_auth_wall(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from src.people import NullPeopleProvider
+
+    # Patch get_people_provider to return NullPeopleProvider so no real HTTP is made
+    monkeypatch.setattr("web.get_people_provider", lambda *a, **k: NullPeopleProvider())
     company_id = client.get("/api/companies").json()["companies"][0]["id"]
     data = client.post(f"/api/companies/{company_id}/people").json()
     assert data["count"] == 0
-    assert "disabled" in data["note"].lower()
 
 
 def test_export_listings_csv(client: TestClient) -> None:

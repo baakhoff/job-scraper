@@ -53,8 +53,8 @@ class Config(BaseSettings):
     # CEO/Founder discovery. OFF by default: LinkedIn's public people search is
     # generally login-gated, so the default provider returns nothing. Set the
     # provider to "linkedin" to attempt the best-effort scrape anyway.
-    people_search_enabled: bool = False
-    people_provider: str = "null"  # one of: "null", "linkedin"
+    people_search_enabled: bool = True
+    people_provider: str = "linkedin"  # one of: "null", "linkedin"
     # Keywords used to find leadership when searching people at a company.
     people_search_keywords: list[str] = ["CEO", "Founder", "Co-Founder", "Owner"]
 
