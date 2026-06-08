@@ -71,6 +71,9 @@ class JobListing(BaseModel):
     job_id: str = Field(..., description="LinkedIn's numeric job id (stable key).")
     title: str
     company: str
+    company_url: HttpUrl | None = Field(
+        None, description="Public company profile URL (from the search card subtitle link)."
+    )
     location: str | None = None
     workplace_type: WorkplaceType | None = None
     url: HttpUrl | None = None
@@ -80,7 +83,15 @@ class JobListing(BaseModel):
     )
     description_snippet: str | None = None
     salary: str | None = None
-    seniority: str | None = None
+    seniority: str | None = Field(None, description="e.g. 'Mid-Senior level' (detail page).")
+    employment_type: str | None = Field(None, description="e.g. 'Full-time' (detail page).")
+    job_function: str | None = Field(
+        None, description="e.g. 'Engineering and Information Technology' (detail page)."
+    )
+    industries: str | None = Field(None, description="e.g. 'Software Development' (detail page).")
+    applicant_count: int | None = Field(
+        None, description="Applicant count parsed from the detail page, when shown."
+    )
 
     @field_validator("title", "company", mode="before")
     @classmethod
@@ -98,17 +109,30 @@ class JobListing(BaseModel):
         Normalizes the loosely-typed dict the parser emits: trims whitespace,
         infers workplace type from the location string, and parses the
         relative/absolute posted time into a UTC ``datetime``.
+
+        Optional detail-page fields (``description``, ``employment_type``,
+        ``applicant_count`` …) are read when present, so a search-card dict that
+        has been merged with :func:`~src.parser.parse_detail_html` output
+        produces a fully-populated listing.
         """
         location = _clean_text(raw.get("location")) or None
         return cls(
             job_id=str(raw.get("job_id") or "").strip(),
             title=raw.get("title"),
             company=raw.get("company"),
+            company_url=_clean_text(raw.get("company_url")) or None,
             location=location,
             workplace_type=_infer_workplace_type(location),
             url=_clean_text(raw.get("url")) or None,
             posted_at=_parse_posted_at(raw.get("posted_at"), raw.get("posted_text")),
+            description=_clean_text(raw.get("description")) or None,
             description_snippet=_clean_text(raw.get("description_snippet")) or None,
+            salary=_clean_text(raw.get("salary")) or None,
+            seniority=_clean_text(raw.get("seniority")) or None,
+            employment_type=_clean_text(raw.get("employment_type")) or None,
+            job_function=_clean_text(raw.get("job_function")) or None,
+            industries=_clean_text(raw.get("industries")) or None,
+            applicant_count=_coerce_int(raw.get("applicant_count")),
         )
 
 
@@ -117,6 +141,16 @@ def _clean_text(value: object) -> str:
     if value is None:
         return ""
     return re.sub(r"\s+", " ", str(value)).strip()
+
+
+def _coerce_int(value: object) -> int | None:
+    """Best-effort int from an int or a string like '1,234' / 'Over 200'."""
+    if value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    match = re.search(r"\d[\d,]*", str(value))
+    return int(match.group(0).replace(",", "")) if match else None
 
 
 def _infer_workplace_type(location: str | None) -> WorkplaceType | None:

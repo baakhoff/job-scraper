@@ -26,7 +26,7 @@ from src.filters import (
     sort_by_posted_desc,
 )
 from src.models import JobListing, SearchParams, WorkplaceType
-from src.parser import parse_search_html
+from src.parser import parse_detail_html, parse_search_html
 from src.scraper import LinkedInScraper, RateLimiter
 from src.storage import Storage
 
@@ -54,8 +54,15 @@ console = Console()
 _LAST_CHECK_FILE = Path(config.db_path).with_name(".last_new_check")
 
 
-async def _run_search(params: SearchParams, max_results: int) -> list[JobListing]:
-    """Drive the async scraper/parser pipeline for one search."""
+async def _run_search(
+    params: SearchParams, max_results: int, *, with_details: bool = False
+) -> list[JobListing]:
+    """Drive the async scraper/parser pipeline for one search.
+
+    When ``with_details`` is set, each listing is enriched with an extra
+    (rate-limited) fetch of its guest detail page — full description, seniority,
+    employment type, job function, industries, applicant count.
+    """
     rate_limiter = RateLimiter(
         delay_min=config.request_delay_min,
         delay_max=config.request_delay_max,
@@ -74,7 +81,38 @@ async def _run_search(params: SearchParams, max_results: int) -> list[JobListing
                     listings.append(JobListing.from_raw(raw))
                 except Exception as exc:  # parse/validation failures are operational
                     console.print(f"[yellow]skipped a card:[/yellow] {exc}")
-        return sort_by_posted_desc(dedupe(listings))[:max_results]
+        listings = sort_by_posted_desc(dedupe(listings))[:max_results]
+        if with_details:
+            listings = await _enrich_with_details(scraper, listings)
+        return listings
+
+
+async def _enrich_with_details(
+    scraper: LinkedInScraper, listings: list[JobListing]
+) -> list[JobListing]:
+    """Fetch each listing's detail page and merge in non-empty extra fields."""
+    enriched: list[JobListing] = []
+    for index, listing in enumerate(listings):
+        if index > 0:
+            await scraper.rate_limiter.wait()
+        html = await scraper.fetch_detail(listing.job_id)
+        if not html.strip():
+            enriched.append(listing)
+            continue
+        detail = parse_detail_html(html)
+        updates = {k: v for k, v in detail.items() if v is not None}
+        if not updates:
+            enriched.append(listing)
+            continue
+        try:
+            # Re-validate through the model rather than model_copy so detail
+            # strings (e.g. company_url) get the same coercion as search fields.
+            merged = {**listing.model_dump(), **updates}
+            enriched.append(JobListing(**merged))
+        except Exception as exc:  # bad detail markup shouldn't drop the base listing
+            console.print(f"[yellow]detail merge skipped for {listing.job_id}:[/yellow] {exc}")
+            enriched.append(listing)
+    return enriched
 
 
 def _render_table(listings: list[JobListing], title: str) -> None:
@@ -110,6 +148,13 @@ def search(
     max_results: int = typer.Option(
         config.max_results, "--max-results", "-n", help="Max listings to fetch."
     ),
+    details: bool = typer.Option(
+        False,
+        "--details",
+        "-d",
+        help="Enrich each listing via its detail page (full description, "
+        "seniority, employment type, applicant count). One extra request per job.",
+    ),
 ) -> None:
     """Run a job search, persist the results, and print them as a table."""
     params = SearchParams(
@@ -119,8 +164,9 @@ def search(
         f"[bold]Searching[/bold] '{keywords}'"
         + (f" in '{location}'" if location else "")
         + f" (up to {max_results})..."
+        + (" [dim](with details)[/dim]" if details else "")
     )
-    listings = asyncio.run(_run_search(params, max_results))
+    listings = asyncio.run(_run_search(params, max_results, with_details=details))
 
     if workplace_type is not None:
         listings = filter_by_workplace_type(listings, [workplace_type])

@@ -27,12 +27,28 @@ python main.py search --keywords "python developer" --location "Berlin" --max-re
 # narrow by workplace type
 python main.py search -k "data engineer" -l "Remote" --workplace-type remote
 
+# enrich each listing via its detail page (full description, seniority,
+# employment type, job function, industries, applicant count). Costs one
+# extra (rate-limited) request per job.
+python main.py search -k "python" -l "Berlin" -n 25 --details
+
 # list stored listings (optionally filtered)
 python main.py list --keyword python --limit 20
 
 # show jobs first seen since the previous `new` check (Telegram-notifier hook)
 python main.py new
 ```
+
+### What gets captured
+
+Every search card yields `title`, `company`, **`company_url`** (the public
+`/company/...` profile link), `location`, the job `url`, and `posted_at`. The
+optional `--details` pass adds the full `description`, `seniority`,
+`employment_type`, `job_function`, `industries`, and `applicant_count`.
+
+See [docs/ENDPOINT_AUDIT.md](docs/ENDPOINT_AUDIT.md) for what the public guest
+endpoints do and don't expose (pagination depth, date filters, geo ids), with
+real request/response evidence.
 
 ### Configuration
 
@@ -43,6 +59,45 @@ environment variables or a `.env` file — e.g. `LJP_REQUEST_DELAY_MIN`,
 > ⚠️ **Be a good citizen.** Public data only, conservative request rates, honest
 > User-Agent. The scraper jitters 2–5s between requests and backs off on `429`.
 > Intended for personal, low-volume use; respect LinkedIn's Terms of Service.
+
+## Docker
+
+A multi-stage `Dockerfile` (python:3.12-slim, deps installed with `uv`,
+non-root user) and a `docker-compose.yml` with a persistent DB volume ship with
+the project. Copy the env template first:
+
+```bash
+cp .env.example .env   # edit LJP_* values to taste
+```
+
+```bash
+# Build the image
+docker compose build
+
+# Run the search configured by LJP_SEARCH_* in .env (one-shot)
+docker compose run --rm parser
+
+# Run any CLI verb by overriding the command
+docker compose run --rm parser python main.py list --limit 20
+docker compose run --rm parser python main.py search -k "rust" -l "Remote" --details
+```
+
+The SQLite DB lives on the named volume `jobs-db` (mounted at `/data`), so it
+survives container restarts. All `LJP_*` variables in `.env` are passed through.
+
+### Scheduled runs
+
+The `scheduler` profile runs the configured search on a loop
+(`LJP_SCHEDULE_INTERVAL` seconds, default hourly) and exposes a healthcheck that
+goes unhealthy if the loop stops stamping its heartbeat:
+
+```bash
+docker compose --profile scheduler up -d
+docker compose ps              # STATUS shows (healthy) once the first run lands
+docker compose logs -f scheduler
+```
+
+`docker compose config` validates the full setup if you just want to lint it.
 
 ## Tech stack
 

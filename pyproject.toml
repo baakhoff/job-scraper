@@ -42,6 +42,8 @@ packages = ["src"]
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+# scripts/ holds throwaway investigation tooling (endpoint audit), not package code.
+extend-exclude = ["scripts"]
 
 [tool.ruff.lint]
 select = [
@@ -69,6 +71,7 @@ python_version = "3.11"
 strict = true
 ignore_missing_imports = true
 plugins = ["pydantic.mypy"]
+exclude = ["scripts/"]
 
 # --- pytest -------------------------------------------------------------------
 [tool.pytest.ini_options]

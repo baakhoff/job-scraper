@@ -1,0 +1,42 @@
+# Keep the build context small and the image clean.
+.git
+.gitignore
+.gitattributes
+.dockerignore
+Dockerfile
+docker-compose.yml
+
+# Virtualenvs / local envs
+.venv
+venv
+env
+ENV
+.env
+
+# Scraped output / databases
+output
+data
+*.db
+*.sqlite
+*.sqlite3
+
+# Caches & tooling artifacts
+__pycache__
+**/__pycache__
+*.py[cod]
+.mypy_cache
+.ruff_cache
+.pytest_cache
+.coverage
+.coverage.*
+htmlcov
+*.egg-info
+build
+dist
+
+# Not needed at runtime
+tests
+scripts
+docs
+.idea
+.vscode

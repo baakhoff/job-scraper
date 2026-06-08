@@ -49,3 +49,38 @@ def test_get_new_jobs_uses_first_seen_at(tmp_path: Path) -> None:
 
     new = storage.get_new_jobs(cutoff)
     assert [j.job_id for j in new] == ["2"]
+
+
+def test_round_trips_enrichment_fields(tmp_path: Path) -> None:
+    storage = Storage(str(tmp_path / "jobs.db"))
+    storage.save_jobs(
+        [
+            _job(
+                "1",
+                company_url="https://www.linkedin.com/company/acme",
+                description="Full description.",
+                employment_type="Full-time",
+                job_function="Engineering",
+                industries="Software Development",
+                applicant_count=200,
+            )
+        ]
+    )
+    (job,) = storage.get_jobs()
+    assert str(job.company_url) == "https://www.linkedin.com/company/acme"
+    assert job.description == "Full description."
+    assert job.employment_type == "Full-time"
+    assert job.applicant_count == 200
+
+
+def test_update_preserves_detail_fields_on_search_only_pass(tmp_path: Path) -> None:
+    """A later search-only upsert must not wipe earlier detail enrichment."""
+    storage = Storage(str(tmp_path / "jobs.db"))
+    storage.save_jobs([_job("1", description="Rich detail.", applicant_count=42)])
+    # Re-seen via a plain search (no detail fields) — enrichment should survive.
+    storage.save_jobs([_job("1", title="Updated Title")])
+
+    (job,) = storage.get_jobs()
+    assert job.title == "Updated Title"
+    assert job.description == "Rich detail."
+    assert job.applicant_count == 42

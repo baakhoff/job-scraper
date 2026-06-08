@@ -1,0 +1,45 @@
+name: linkedin-job-parser
+
+# Shared build/runtime config for both services (same image, different command).
+x-ljp-common: &ljp-common
+  build:
+    context: .
+    target: runtime
+  image: linkedin-job-parser:latest
+  env_file:
+    - path: .env
+      required: false
+  environment:
+    # The DB lives on the named volume, not in the image layer.
+    LJP_DB_PATH: /data/jobs.db
+  volumes:
+    - jobs-db:/data
+
+services:
+  # One-shot / ad-hoc CLI runs. With no command it runs a single search built
+  # from LJP_SEARCH_* env vars; override the command for other verbs, e.g.
+  #   docker compose run --rm parser python main.py list --limit 20
+  parser:
+    <<: *ljp-common
+    restart: "no"
+
+  # Continuously re-run the search on a schedule. Enable with its profile:
+  #   docker compose --profile scheduler up -d
+  scheduler:
+    <<: *ljp-common
+    profiles: ["scheduler"]
+    command: ["/app/docker/scheduler.sh"]
+    environment:
+      LJP_DB_PATH: /data/jobs.db
+      LJP_SCHEDULE_INTERVAL: ${LJP_SCHEDULE_INTERVAL:-3600}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "/app/docker/healthcheck.sh"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+
+volumes:
+  # Persists the SQLite DB (and the `.last_new_check` marker) across restarts.
+  jobs-db:

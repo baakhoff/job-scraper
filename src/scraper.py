@@ -23,6 +23,13 @@ from .models import SearchParams
 log = structlog.get_logger(__name__)
 
 GUEST_SEARCH_URL = "https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search"
+# Per-job detail fragment served to logged-out users (full description, job
+# criteria, applicant count). One request per job — gate it behind the limiter.
+GUEST_DETAIL_URL = "https://www.linkedin.com/jobs-guest/jobs/api/jobPosting/{job_id}"
+# Initial offset step / fallback only. The endpoint's real page size drifts
+# (observed ~10, historically 25), so ``iter_pages`` advances ``start`` by the
+# number of cards actually returned rather than trusting this constant. See
+# docs/ENDPOINT_AUDIT.md.
 PAGE_SIZE = 25
 
 
@@ -140,15 +147,18 @@ class LinkedInScraper:
         return ""
 
     async def iter_pages(self, params: SearchParams) -> AsyncIterator[str]:
-        """Yield successive pages of HTML, advancing ``start`` by ``PAGE_SIZE``.
+        """Yield successive pages of HTML, advancing ``start`` by the real page size.
 
-        Loops up to ``max_pages`` (and, if set, until ``max_results`` cards have
-        been seen), awaiting the rate limiter between requests and stopping
-        early when a page comes back empty.
+        Begins at ``params.start`` and, after each page, advances ``start`` by
+        the number of cards that page actually returned — not a fixed stride —
+        so we neither skip listings (when the endpoint serves fewer than
+        ``PAGE_SIZE``) nor re-fetch them. Loops up to ``max_pages`` (and, if set,
+        until ``max_results`` cards have been seen), awaiting the rate limiter
+        between requests and stopping when a page comes back empty.
         """
         seen = 0
+        start = params.start
         for page in range(self.max_pages):
-            start = page * PAGE_SIZE
             if self.max_results is not None and seen >= self.max_results:
                 break
 
@@ -162,7 +172,42 @@ class LinkedInScraper:
                 log.info("empty_page_stop", page=page, start=start)
                 break
 
-            # Cheap card count for the max_results gate (one <li> per card).
-            seen += stripped.count("<li")
-            log.info("page_fetched", page=page, start=start, approx_cards_total=seen)
+            # Cheap card count (one <li> per card) — drives both the max_results
+            # gate and the offset stride. A non-empty page with no cards means
+            # we've run off the end of the usable result set.
+            cards = stripped.count("<li")
+            if cards == 0:
+                log.info("no_cards_stop", page=page, start=start)
+                break
+            seen += cards
+            log.info("page_fetched", page=page, start=start, cards=cards, total=seen)
             yield html
+            start += cards
+
+    async def fetch_detail(self, job_id: str) -> str:
+        """Fetch a single job's guest detail fragment (or ``""`` on failure).
+
+        Same retry/backoff policy as :meth:`fetch_page`. The caller is
+        responsible for spacing calls via the rate limiter — this is one extra
+        request per job, so enriching a full result set multiplies request load.
+        """
+        url = GUEST_DETAIL_URL.format(job_id=job_id)
+        for attempt in range(self.max_retries):
+            try:
+                response = await self._client.get(url, headers=self._headers())
+            except httpx.TransportError as exc:
+                log.warning("detail_request_failed", job_id=job_id, error=str(exc), attempt=attempt)
+                await self.rate_limiter.backoff(attempt)
+                continue
+
+            if response.status_code == 429:
+                await self.rate_limiter.backoff(attempt)
+                continue
+            if response.status_code in (400, 404):
+                log.info("detail_unavailable", job_id=job_id, status=response.status_code)
+                return ""
+            response.raise_for_status()
+            return response.text
+
+        log.error("detail_max_retries_exceeded", job_id=job_id)
+        return ""

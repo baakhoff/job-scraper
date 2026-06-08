@@ -16,7 +16,7 @@ from collections.abc import Iterable, Sequence
 from datetime import UTC, datetime
 
 import structlog
-from sqlalchemy import DateTime, String, create_engine, select
+from sqlalchemy import DateTime, Integer, String, create_engine, select, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
@@ -37,11 +37,19 @@ class JobRecord(Base):
     job_id: Mapped[str] = mapped_column(String, primary_key=True)
     title: Mapped[str] = mapped_column(String)
     company: Mapped[str] = mapped_column(String)
+    company_url: Mapped[str | None] = mapped_column(String, nullable=True)
     location: Mapped[str | None] = mapped_column(String, nullable=True)
     workplace_type: Mapped[str | None] = mapped_column(String, nullable=True)
     url: Mapped[str | None] = mapped_column(String, nullable=True)
     posted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    description: Mapped[str | None] = mapped_column(String, nullable=True)
     description_snippet: Mapped[str | None] = mapped_column(String, nullable=True)
+    salary: Mapped[str | None] = mapped_column(String, nullable=True)
+    seniority: Mapped[str | None] = mapped_column(String, nullable=True)
+    employment_type: Mapped[str | None] = mapped_column(String, nullable=True)
+    job_function: Mapped[str | None] = mapped_column(String, nullable=True)
+    industries: Mapped[str | None] = mapped_column(String, nullable=True)
+    applicant_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
     def to_listing(self) -> JobListing:
@@ -50,11 +58,19 @@ class JobRecord(Base):
             job_id=self.job_id,
             title=self.title,
             company=self.company,
+            company_url=self.company_url,
             location=self.location,
             workplace_type=WorkplaceType(self.workplace_type) if self.workplace_type else None,
             url=self.url,
             posted_at=self.posted_at,
+            description=self.description,
             description_snippet=self.description_snippet,
+            salary=self.salary,
+            seniority=self.seniority,
+            employment_type=self.employment_type,
+            job_function=self.job_function,
+            industries=self.industries,
+            applicant_count=self.applicant_count,
         )
 
 
@@ -75,8 +91,33 @@ class Storage:
         self.init_db()
 
     def init_db(self) -> None:
-        """Create tables if they do not exist."""
+        """Create tables if absent, then add any columns missing on old DBs.
+
+        ``create_all`` only creates whole tables — it will not add a column to a
+        pre-existing ``job_listings`` table. So after creating, we diff the live
+        schema against the model and ``ALTER TABLE ADD COLUMN`` the gaps. This
+        lets a database from an earlier schema pick up new fields (company_url,
+        employment_type, …) without a manual migration or a data wipe.
+        """
         Base.metadata.create_all(self.engine)
+        self._add_missing_columns()
+
+    def _add_missing_columns(self) -> None:
+        """Lightweight forward-only migration: add model columns absent from SQLite."""
+        table_name = JobRecord.__tablename__
+        with self.engine.begin() as conn:
+            existing = {
+                row[1]  # PRAGMA table_info: (cid, name, type, ...)
+                for row in conn.execute(text(f'PRAGMA table_info("{table_name}")'))
+            }
+            for column in JobRecord.__table__.columns:
+                if column.name in existing:
+                    continue
+                col_type = column.type.compile(self.engine.dialect)
+                conn.execute(
+                    text(f'ALTER TABLE "{table_name}" ADD COLUMN "{column.name}" {col_type}')
+                )
+                log.info("schema_column_added", column=column.name)
 
     def save_jobs(self, listings: Iterable[JobListing]) -> int:
         """Insert or update listings keyed by ``job_id``; return rows newly inserted.
@@ -158,21 +199,49 @@ def _to_record(listing: JobListing, *, first_seen_at: datetime) -> JobRecord:
         job_id=listing.job_id,
         title=listing.title,
         company=listing.company,
+        company_url=str(listing.company_url) if listing.company_url else None,
         location=listing.location,
         workplace_type=listing.workplace_type.value if listing.workplace_type else None,
         url=str(listing.url) if listing.url else None,
         posted_at=listing.posted_at,
+        description=listing.description,
         description_snippet=listing.description_snippet,
+        salary=listing.salary,
+        seniority=listing.seniority,
+        employment_type=listing.employment_type,
+        job_function=listing.job_function,
+        industries=listing.industries,
+        applicant_count=listing.applicant_count,
         first_seen_at=first_seen_at,
     )
 
 
 def _update_record(record: JobRecord, listing: JobListing) -> None:
-    """Update a mutable ORM row in place from a listing (keeps ``first_seen_at``)."""
+    """Update a mutable ORM row in place from a listing (keeps ``first_seen_at``).
+
+    Detail-only fields are only overwritten when the incoming listing actually
+    carries them, so a later cheap search-only pass doesn't wipe enrichment
+    (description, applicant count, …) captured by an earlier ``--details`` run.
+    """
     record.title = listing.title
     record.company = listing.company
     record.location = listing.location
     record.workplace_type = listing.workplace_type.value if listing.workplace_type else None
     record.url = str(listing.url) if listing.url else None
     record.posted_at = listing.posted_at
-    record.description_snippet = listing.description_snippet
+    if listing.company_url:
+        record.company_url = str(listing.company_url)
+    if listing.description_snippet:
+        record.description_snippet = listing.description_snippet
+    for field in (
+        "description",
+        "salary",
+        "seniority",
+        "employment_type",
+        "job_function",
+        "industries",
+        "applicant_count",
+    ):
+        value = getattr(listing, field)
+        if value is not None:
+            setattr(record, field, value)

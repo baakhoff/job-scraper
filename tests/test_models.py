@@ -64,3 +64,24 @@ def test_from_raw_parses_relative_posted_text() -> None:
 def test_from_raw_rejects_empty_title() -> None:
     with pytest.raises(ValidationError):
         JobListing.from_raw({"job_id": "1", "title": "   ", "company": "C"})
+
+
+def test_from_raw_reads_company_url_and_detail_fields() -> None:
+    job = JobListing.from_raw(
+        {
+            "job_id": "1",
+            "title": "Engineer",
+            "company": "Acme",
+            "company_url": "https://www.linkedin.com/company/acme",
+            "description": "Full description here.",
+            "seniority": "Mid-Senior level",
+            "employment_type": "Full-time",
+            "job_function": "Engineering",
+            "industries": "Software Development",
+            "applicant_count": "Over 200",
+        }
+    )
+    assert str(job.company_url) == "https://www.linkedin.com/company/acme"
+    assert job.description == "Full description here."
+    assert job.employment_type == "Full-time"
+    assert job.applicant_count == 200  # coerced from "Over 200"

@@ -23,10 +23,21 @@ log = structlog.get_logger(__name__)
 CARD_SELECTOR = "li"
 TITLE_SELECTOR = "h3.base-search-card__title"
 COMPANY_SELECTOR = "h4.base-search-card__subtitle"
+# The company name in the subtitle wraps an anchor to the public company
+# profile (/company/...). Free on every search card — no detail fetch needed.
+COMPANY_LINK_SELECTOR = "h4.base-search-card__subtitle a"
 LOCATION_SELECTOR = "span.job-search-card__location"
 LINK_SELECTOR = "a.base-card__full-link"
 TIME_SELECTOR = "time"
 SNIPPET_SELECTOR = "p.job-search-card__snippet"
+
+# Detail-page selectors (jobs-guest/.../jobPosting/{id}). Also fragile.
+DETAIL_DESCRIPTION_SELECTOR = "div.show-more-less-html__markup, div.description__text"
+DETAIL_CRITERIA_ITEM_SELECTOR = "li.description__job-criteria-item"
+DETAIL_CRITERIA_HEADER_SELECTOR = "h3.description__job-criteria-subheader"
+DETAIL_CRITERIA_VALUE_SELECTOR = "span.description__job-criteria-text"
+DETAIL_COMPANY_LINK_SELECTOR = "a.topcard__org-name-link"
+DETAIL_APPLICANTS_RE = re.compile(r"([\d,]+)\s+applicants?", re.IGNORECASE)
 # The card root carries the job id in a data attribute; a couple of variants
 # have shipped over time, so try each.
 ENTITY_URN_ATTRS = ("data-entity-urn", "data-id")
@@ -78,6 +89,7 @@ def parse_card(card: Tag) -> dict[str, object] | None:
         "job_id": job_id,
         "title": title,
         "company": company,
+        "company_url": _href(card, COMPANY_LINK_SELECTOR),
         "location": _text(card, LOCATION_SELECTOR),
         "url": _href(card, LINK_SELECTOR),
         "posted_at": posted_at,
@@ -87,23 +99,39 @@ def parse_card(card: Tag) -> dict[str, object] | None:
 
 
 def parse_detail_html(html: str) -> dict[str, object]:
-    """Parse a single job *detail* page (full description, salary, seniority).
+    """Parse a single job *detail* page into a raw dict of enrichment fields.
 
-    Used when a deeper per-job fetch is enabled.
+    The guest detail fragment (``jobs-guest/.../jobPosting/{id}``) exposes the
+    full description plus a "job criteria" block (seniority, employment type,
+    job function, industries), an applicant count, and the company profile
+    link. Used when a deeper per-job fetch is enabled (``search --details``).
+
+    All fields are best-effort; missing ones come back as ``None``. Merge the
+    result into a search-card raw dict before :meth:`JobListing.from_raw`.
     """
     soup = BeautifulSoup(html, "lxml")
-    description_el = soup.select_one("div.show-more-less-html__markup, div.description__text")
+    description_el = soup.select_one(DETAIL_DESCRIPTION_SELECTOR)
     criteria: dict[str, str] = {}
-    for item in soup.select("li.description__job-criteria-item"):
-        header = item.select_one("h3.description__job-criteria-subheader")
-        value = item.select_one("span.description__job-criteria-text")
+    for item in soup.select(DETAIL_CRITERIA_ITEM_SELECTOR):
+        header = item.select_one(DETAIL_CRITERIA_HEADER_SELECTOR)
+        value = item.select_one(DETAIL_CRITERIA_VALUE_SELECTOR)
         if isinstance(header, Tag) and isinstance(value, Tag):
             criteria[header.get_text(strip=True).lower()] = value.get_text(strip=True)
+
+    applicants_match = DETAIL_APPLICANTS_RE.search(html)
+    applicant_count = (
+        int(applicants_match.group(1).replace(",", "")) if applicants_match else None
+    )
 
     return {
         "description": description_el.get_text(" ", strip=True) if description_el else None,
         "seniority": criteria.get("seniority level"),
-        "salary": criteria.get("base salary"),
+        "salary": criteria.get("base salary") or criteria.get("compensation"),
+        "employment_type": criteria.get("employment type"),
+        "job_function": criteria.get("job function"),
+        "industries": criteria.get("industries"),
+        "applicant_count": applicant_count,
+        "company_url": _href_soup(soup, DETAIL_COMPANY_LINK_SELECTOR),
     }
 
 
@@ -146,4 +174,15 @@ def _href(card: Tag, selector: str) -> str | None:
     if not isinstance(href, str):
         return None
     # Drop tracking query params for a stable, clean URL.
+    return href.split("?", 1)[0] or None
+
+
+def _href_soup(soup: BeautifulSoup, selector: str) -> str | None:
+    """``_href`` against a whole-document soup (detail pages, not a single card)."""
+    el = soup.select_one(selector)
+    if not isinstance(el, Tag):
+        return None
+    href = el.get("href")
+    if not isinstance(href, str):
+        return None
     return href.split("?", 1)[0] or None
