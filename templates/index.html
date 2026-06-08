@@ -422,7 +422,7 @@
         const data = await api(“/api/companies/search”, {
           method: “POST”,
           headers: { “Content-Type”: “application/json” },
-          body: JSON.stringify({ keywords: kw, location: loc, max_results: 25 }),
+          body: JSON.stringify({ keywords: kw, location: loc, max_results: 25, details: $("details").checked }),
         });
         setStatus(false, `<span class=”pill”>${data.new_companies} new companies</span> found for “${esc(kw)}”.`);
         await loadPositions();

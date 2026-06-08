@@ -80,6 +80,8 @@ def test_people_endpoint_enabled_returns_empty_on_auth_wall(
     company_id = client.get("/api/companies").json()["companies"][0]["id"]
     data = client.post(f"/api/companies/{company_id}/people").json()
     assert data["count"] == 0
+    assert data["note"] is not None
+    assert "login" in data["note"].lower() or "leader" in data["note"].lower()
 
 
 def test_export_listings_csv(client: TestClient) -> None:

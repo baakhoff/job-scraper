@@ -65,12 +65,13 @@ def normalize_position_keyword(kw: str) -> str:
     "Senior Python Developer" and "Python Developer" normalize to the same
     keyword and are stored under a single position row.
     """
-    text = kw.strip().lower()
+    base = kw.strip().lower()
+    text = base
     prev = None
     while prev != text:
         prev = text
         text = _SENIORITY_RE.sub("", text).strip()
-    return text
+    return text if text else base
 
 
 class Base(DeclarativeBase):

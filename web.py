@@ -179,7 +179,7 @@ async def api_companies_search(req: SearchRequest) -> dict[str, object]:
         counts = await storage.save_search_results(
             listings, keyword=req.keywords, location=params.location
         )
-        position_id = int(counts["position_id"])
+        position_id = counts["position_id"]
         companies = await storage.get_companies_for_position(position_id)
     return {
         "count": len(companies),
