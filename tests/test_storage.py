@@ -211,3 +211,29 @@ async def test_update_company_patches_enrichment(storage: Storage) -> None:
     assert updated is not None
     assert updated.industry == "Software"
     assert updated.website == "https://acme.example"
+
+
+# --------------------------------------------------------------------------- #
+# Position normalization                                                       #
+# --------------------------------------------------------------------------- #
+
+
+def test_normalize_position_keyword() -> None:
+    from src.storage import normalize_position_keyword
+
+    assert normalize_position_keyword("Senior Python Developer") == "python developer"
+    assert normalize_position_keyword("Junior Python Developer") == "python developer"
+    assert normalize_position_keyword("Lead Engineer") == "engineer"
+    assert normalize_position_keyword("Python Developer") == "python developer"
+    assert normalize_position_keyword("  Staff  Software  Engineer  ") == "software  engineer"
+
+
+async def test_position_normalization_deduplicates(storage: Storage) -> None:
+    listings = [_job("101", title="SWE", company="Acme")]
+    await storage.save_search_results(listings, keyword="Senior Python Developer", location=None)
+    await storage.save_search_results(listings, keyword="Python Developer", location=None)
+    positions = await storage.get_positions()
+    # Both searches should resolve to the same position (by normalized keyword).
+    assert len(positions) == 1
+    # keyword on Position returns display_keyword (the original first-seen search term).
+    assert positions[0].keyword == "Senior Python Developer"
