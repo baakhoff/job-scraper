@@ -222,11 +222,9 @@
     }
 
     function exportButtons(entity) {
-      const kw = $("keywords").value.trim();
-      const q = kw ? `?keyword=${encodeURIComponent(kw)}` : "";
       exportBar.innerHTML =
-        `<a class="btn-ghost btn-sm" href="/api/export/${entity}.csv${q}">⬇ CSV</a>` +
-        `<a class="btn-ghost btn-sm" href="/api/export/${entity}.json${q}">⬇ JSON</a>`;
+        `<a class="btn-ghost btn-sm" href="/api/export/${entity}.csv">⬇ CSV</a>` +
+        `<a class="btn-ghost btn-sm" href="/api/export/${entity}.json">⬇ JSON</a>`;
     }
 
     // ---------- search form ----------
@@ -270,8 +268,7 @@
     async function loadSavedJobs() {
       setStatus(true, "Loading saved jobs…");
       try {
-        const kw = $("keywords").value.trim();
-        const data = await api("/api/export/listings.json" + (kw ? `?keyword=${encodeURIComponent(kw)}` : ""));
+        const data = await api("/api/export/listings.json");
         // listings.json returns a flat array
         setStatus(false, `<span class="pill">${data.length} saved jobs</span> from your database.`);
         renderJobs(data);
@@ -301,8 +298,7 @@
     async function loadSavedCompanies() {
       setStatus(true, "Loading saved companies…");
       try {
-        const kw = $("keywords").value.trim();
-        const data = await api("/api/companies" + (kw ? `?keyword=${encodeURIComponent(kw)}` : ""));
+        const data = await api("/api/companies");
         setStatus(false, `<span class="pill">${data.count} companies</span> from your database.`);
         renderCompanies(data.companies);
         exportButtons("companies");
