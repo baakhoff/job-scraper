@@ -333,11 +333,30 @@
             <td>${esc(p.location || "—")}</td>
             <td class="num-cell">${p.company_count}</td>
             <td class="num-cell">${p.listing_count}</td>
+            <td><button class="btn-ghost btn-sm search-more-btn" data-kw="${esc(p.keyword)}" data-loc="${esc(p.location||'')}">Search more</button></td>
           </tr>`).join("");
-        view.innerHTML = `<table><thead><tr><th>Position</th><th>Location</th><th>Companies</th><th>Listings</th></tr></thead><tbody>${rows}</tbody></table>
+        view.innerHTML = `<table><thead><tr><th>Position</th><th>Location</th><th>Companies</th><th>Listings</th><th></th></tr></thead><tbody>${rows}</tbody></table>
           <div id="explore-companies" style="margin-top:18px"></div>`;
         view.querySelectorAll(“[data-pos]”).forEach((tr) =>
           tr.addEventListener(“click”, () => loadPositionDetail(tr.dataset.pos, tr.dataset.label)));
+        view.querySelectorAll(“.search-more-btn”).forEach((btn) =>
+          btn.addEventListener(“click”, (e) => {
+            e.stopPropagation();
+            searchMoreForPosition(btn.dataset.kw, btn.dataset.loc || null);
+          }));
+      } catch (err) { setStatus(false, `❌ ${esc(err.message)}`); }
+    }
+
+    async function searchMoreForPosition(kw, loc) {
+      setStatus(true, `Searching more for “${esc(kw)}”…`);
+      try {
+        const data = await api(“/api/companies/search”, {
+          method: “POST”,
+          headers: { “Content-Type”: “application/json” },
+          body: JSON.stringify({ keywords: kw, location: loc, max_results: 25 }),
+        });
+        setStatus(false, `<span class=”pill”>${data.new_companies} new companies</span> found for “${esc(kw)}”.`);
+        await loadPositions();
       } catch (err) { setStatus(false, `❌ ${esc(err.message)}`); }
     }
 
