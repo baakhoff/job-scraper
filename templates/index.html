@@ -30,7 +30,7 @@
     form { display: grid; grid-template-columns: repeat(12, 1fr); gap: 12px; align-items: end; }
     .field { display: flex; flex-direction: column; gap: 6px; }
     .kw { grid-column: span 4; } .loc { grid-column: span 3; } .wt { grid-column: span 2; }
-    .num { grid-column: span 3; } .det { grid-column: span 4; } .go { grid-column: span 8; }
+    .dp { grid-column: span 2; } .num { grid-column: span 2; } .det { grid-column: span 4; } .go { grid-column: span 8; }
     label { font-size: 11px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .4px; }
     input[type=text], input[type=number], select { padding: 9px 11px; border: 1px solid var(--line);
       border-radius: 8px; font-size: 14px; background: #fff; color: var(--ink); width: 100%; }
@@ -103,12 +103,23 @@
     .person .nm { font-weight: 600; font-size: 14px; }
     .person .hl { font-size: 12.5px; color: var(--muted); }
     footer { text-align: center; color: var(--muted); font-size: 12px; padding: 24px; }
+    .help-drawer { width: min(640px, 94vw); }
+    .help-drawer h3 { margin: 14px 0 6px; font-size: 14px; }
+    .help-drawer p, .help-drawer li { font-size: 13.5px; color: var(--ink); line-height: 1.6; }
+    .help-drawer ul { padding-left: 18px; margin: 4px 0; }
+    .help-btn { margin-left: auto; background: rgba(255,255,255,.15); color: #fff;
+      border-radius: 50%; width: 28px; height: 28px; padding: 0; font-size: 13px;
+      font-weight: 700; border: none; cursor: pointer; }
+    .help-btn:hover { background: rgba(255,255,255,.3); }
   </style>
 </head>
 <body>
-  <header>
-    <h1>LinkedIn Job Parser</h1>
-    <p>Search public LinkedIn jobs — discover companies hiring per role, and explore your saved data.</p>
+  <header style="display:flex;justify-content:space-between;align-items:start">
+    <div>
+      <h1>LinkedIn Job Parser</h1>
+      <p>Search public LinkedIn jobs — discover companies hiring per role, and explore your saved data.</p>
+    </div>
+    <button class="help-btn" id="help-btn" title="Help / Documentation">?</button>
   </header>
 
   <main class="wrap">
@@ -138,13 +149,22 @@
             <option value="on_site">On-site</option>
           </select>
         </div>
+        <div class="field dp">
+          <label for="posted_within">Date posted</label>
+          <select id="posted_within">
+            <option value="">Any time</option>
+            <option value="86400">Past 24 h</option>
+            <option value="604800">Past week</option>
+            <option value="2592000">Past month</option>
+          </select>
+        </div>
         <div class="field num">
           <label for="max_results">Max results</label>
           <input id="max_results" type="number" value="25" min="1" max="200" />
         </div>
         <div class="field det">
           <label>Detail pages</label>
-          <div class="checkbox"><input id="details" type="checkbox" /><span>Fetch full details (slower)</span></div>
+          <div class="checkbox"><input id="details" type="checkbox" checked /><span>Fetch full details (slower)</span></div>
         </div>
         <div class="field go">
           <label>&nbsp;</label>
@@ -177,6 +197,54 @@
   </aside>
 
   <footer>linkedin-job-parser · public data only · for personal, low-volume use</footer>
+
+  <!-- help / documentation drawer -->
+  <div class="drawer-bg" id="help-bg"></div>
+  <aside class="drawer help-drawer" id="help-drawer">
+    <div class="drawer-head">
+      <button class="drawer-close" id="help-close">✕ Close</button>
+      <h2>How to use</h2>
+      <div class="sub">LinkedIn Job Parser — public data only</div>
+    </div>
+    <div class="drawer-body">
+      <div class="section">
+        <h3>What this is</h3>
+        <p>Scrapes <strong>public</strong> LinkedIn job postings (no login, no API key). Results are saved to a local database (deduped). Intended for personal, low-volume use only — please respect LinkedIn's Terms of Service.</p>
+      </div>
+      <div class="section">
+        <h3>Tabs</h3>
+        <ul>
+          <li><strong>Jobs</strong> — search LinkedIn and save listings. Each search appends new results; duplicates are skipped.</li>
+          <li><strong>Companies</strong> — run a search and see which companies are hiring for that role, grouped by employer. Use <em>Show saved</em> to browse without a new scrape.</li>
+          <li><strong>Explore</strong> — browse all your saved positions and companies without hitting LinkedIn. Click a position to see who's hiring. Use <em>Search more</em> to fetch fresh results for any saved position.</li>
+        </ul>
+      </div>
+      <div class="section">
+        <h3>Search tips</h3>
+        <ul>
+          <li><strong>Keywords</strong> — job title, skills, or role (e.g. "python developer", "data scientist").</li>
+          <li><strong>Location</strong> — city, country, or "Remote". LinkedIn is fuzzy here; leave blank for worldwide.</li>
+          <li><strong>Workplace</strong> — filter to Remote, Hybrid, or On-site only.</li>
+          <li><strong>Date posted</strong> — limit to jobs posted in the last 24 h / week / month.</li>
+          <li><strong>Max results</strong> — up to 200 (each page is 25 listings, so 200 = 8 pages).</li>
+          <li><strong>Fetch full details</strong> — fetches each job's detail page for seniority, employment type, full description, and applicant count. Slower (one extra request per listing) but richer data.</li>
+        </ul>
+      </div>
+      <div class="section">
+        <h3>Positions &amp; normalization</h3>
+        <p>Searches are grouped into <em>positions</em> by keyword + location. Common seniority prefixes (Senior, Junior, Lead, etc.) are stripped, so "Senior Python Developer" and "Python Developer" land in the same position group.</p>
+      </div>
+      <div class="section">
+        <h3>Limitations</h3>
+        <ul>
+          <li><strong>Rate limiting</strong> — LinkedIn blocks rapid requests. Searches include jittered delays (2–5 s per page) and automatic 429 backoff. A large search can take a minute.</li>
+          <li><strong>People search (Find leaders)</strong> — LinkedIn's public people search is login-gated. The button attempts a best-effort scrape but usually returns no results.</li>
+          <li><strong>Fragile selectors</strong> — LinkedIn changes its HTML markup without notice. If results are empty or fields are missing, selectors in <code>src/parser.py</code> may need updating.</li>
+          <li><strong>Public data only</strong> — no private profiles, no messages, no company internal data.</li>
+        </ul>
+      </div>
+    </div>
+  </aside>
 
   <script>
     const $ = (id) => document.getElementById(id);
@@ -222,11 +290,9 @@
     }
 
     function exportButtons(entity) {
-      const kw = $("keywords").value.trim();
-      const q = kw ? `?keyword=${encodeURIComponent(kw)}` : "";
       exportBar.innerHTML =
-        `<a class="btn-ghost btn-sm" href="/api/export/${entity}.csv${q}">⬇ CSV</a>` +
-        `<a class="btn-ghost btn-sm" href="/api/export/${entity}.json${q}">⬇ JSON</a>`;
+        `<a class="btn-ghost btn-sm" href="/api/export/${entity}.csv">⬇ CSV</a>` +
+        `<a class="btn-ghost btn-sm" href="/api/export/${entity}.json">⬇ JSON</a>`;
     }
 
     // ---------- search form ----------
@@ -239,6 +305,7 @@
         keywords: $("keywords").value.trim(),
         location: $("location").value.trim() || null,
         workplace_type: $("workplace_type").value || null,
+        posted_within_seconds: Number($("posted_within").value) || null,
         max_results: Number($("max_results").value) || 25,
         details: $("details").checked,
       };
@@ -270,8 +337,7 @@
     async function loadSavedJobs() {
       setStatus(true, "Loading saved jobs…");
       try {
-        const kw = $("keywords").value.trim();
-        const data = await api("/api/export/listings.json" + (kw ? `?keyword=${encodeURIComponent(kw)}` : ""));
+        const data = await api("/api/export/listings.json");
         // listings.json returns a flat array
         setStatus(false, `<span class="pill">${data.length} saved jobs</span> from your database.`);
         renderJobs(data);
@@ -301,8 +367,7 @@
     async function loadSavedCompanies() {
       setStatus(true, "Loading saved companies…");
       try {
-        const kw = $("keywords").value.trim();
-        const data = await api("/api/companies" + (kw ? `?keyword=${encodeURIComponent(kw)}` : ""));
+        const data = await api("/api/companies");
         setStatus(false, `<span class="pill">${data.count} companies</span> from your database.`);
         renderCompanies(data.companies);
         exportButtons("companies");
@@ -337,29 +402,67 @@
             <td>${esc(p.location || "—")}</td>
             <td class="num-cell">${p.company_count}</td>
             <td class="num-cell">${p.listing_count}</td>
+            <td><button class="btn-ghost btn-sm search-more-btn" data-kw="${esc(p.keyword)}" data-loc="${esc(p.location||'')}">Search more</button></td>
           </tr>`).join("");
-        view.innerHTML = `<table><thead><tr><th>Position</th><th>Location</th><th>Companies</th><th>Listings</th></tr></thead><tbody>${rows}</tbody></table>
+        view.innerHTML = `<table><thead><tr><th>Position</th><th>Location</th><th>Companies</th><th>Listings</th><th></th></tr></thead><tbody>${rows}</tbody></table>
           <div id="explore-companies" style="margin-top:18px"></div>`;
-        view.querySelectorAll("[data-pos]").forEach((tr) =>
-          tr.addEventListener("click", () => loadPositionCompanies(tr.dataset.pos, tr.dataset.label)));
+        view.querySelectorAll(“[data-pos]”).forEach((tr) =>
+          tr.addEventListener(“click”, () => loadPositionDetail(tr.dataset.pos, tr.dataset.label)));
+        view.querySelectorAll(“.search-more-btn”).forEach((btn) =>
+          btn.addEventListener(“click”, (e) => {
+            e.stopPropagation();
+            searchMoreForPosition(btn.dataset.kw, btn.dataset.loc || null);
+          }));
       } catch (err) { setStatus(false, `❌ ${esc(err.message)}`); }
     }
 
-    async function loadPositionCompanies(posId, label) {
-      const target = $("explore-companies");
-      target.innerHTML = `<div class="status"><span class="spinner"></span><span>Loading companies…</span></div>`;
+    async function searchMoreForPosition(kw, loc) {
+      setStatus(true, `Searching more for “${esc(kw)}”…`);
       try {
-        const data = await api(`/api/positions/${posId}/companies`);
-        const rows = data.companies.map((c) => `
-          <tr class="clickable" data-company="${c.id}">
-            <td><b>${esc(c.name)}</b></td><td class="num-cell">${c.listing_count}</td>
-            <td>${esc(c.location || "—")}</td>
-            <td><button class="btn-ghost btn-sm" data-view="${c.id}">View</button></td>
-          </tr>`).join("");
-        target.innerHTML = `<h3 style="font-size:15px;margin:0 0 8px">Companies hiring for “${esc(label)}” (${data.count})</h3>
-          <table><thead><tr><th>Company</th><th>Listings</th><th>Location</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
-        target.querySelectorAll("[data-company]").forEach((tr) =>
-          tr.addEventListener("click", () => openCompany(tr.dataset.company)));
+        const data = await api(“/api/companies/search”, {
+          method: “POST”,
+          headers: { “Content-Type”: “application/json” },
+          body: JSON.stringify({ keywords: kw, location: loc, max_results: 25, details: $("details").checked }),
+        });
+        setStatus(false, `<span class=”pill”>${data.new_companies} new companies</span> found for “${esc(kw)}”.`);
+        await loadPositions();
+      } catch (err) { setStatus(false, `❌ ${esc(err.message)}`); }
+    }
+
+    async function loadPositionDetail(posId, label, activeView = “companies”) {
+      const target = $(“explore-companies”);
+      target.innerHTML = `<div class=”status”><span class=”spinner”></span><span>Loading…</span></div>`;
+      try {
+        const toggleHtml = `<div style=”display:flex;gap:8px;margin-bottom:12px”>
+          <button class=”btn-ghost btn-sm” id=”toggle-co” ${activeView === “companies” ? “style='font-weight:700'” : “”}>Companies</button>
+          <button class=”btn-ghost btn-sm” id=”toggle-li” ${activeView === “listings” ? “style='font-weight:700'” : “”}>Listings</button>
+        </div>`;
+        if (activeView === “companies”) {
+          const data = await api(`/api/positions/${posId}/companies`);
+          const rows = data.companies.map((c) => `
+            <tr class=”clickable” data-company=”${c.id}”>
+              <td><b>${esc(c.name)}</b></td><td class=”num-cell”>${c.listing_count}</td>
+              <td>${esc(c.location || “—“)}</td>
+              <td><button class=”btn-ghost btn-sm” data-view=”${c.id}”>View</button></td>
+            </tr>`).join(“”);
+          target.innerHTML = toggleHtml + `<h3 style=”font-size:15px;margin:0 0 8px”>Companies hiring for “${esc(label)}” (${data.count})</h3>
+            <table><thead><tr><th>Company</th><th>Listings</th><th>Location</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
+          target.querySelectorAll(“[data-company]”).forEach((tr) =>
+            tr.addEventListener(“click”, () => openCompany(tr.dataset.company)));
+        } else {
+          const data = await api(`/api/positions/${posId}/listings`);
+          const rows = data.listings.map((j) => `
+            <tr>
+              <td>${j.url ? `<a class=”link” href=”${esc(j.url)}” target=”_blank” rel=”noopener”>${esc(j.title)}</a>` : esc(j.title)}</td>
+              <td>${esc(j.company)}</td>
+              <td>${esc(j.location || “—“)}</td>
+              <td>${j.posted_at ? esc(j.posted_at) : “—“}</td>
+            </tr>`).join(“”);
+          target.innerHTML = toggleHtml + `<h3 style=”font-size:15px;margin:0 0 8px”>Listings for “${esc(label)}” (${data.count})</h3>
+            <table><thead><tr><th>Title</th><th>Company</th><th>Location</th><th>Posted</th></tr></thead><tbody>${rows || '<tr><td colspan=”4” class=”empty”>No listings stored.</td></tr>'}</tbody></table>`;
+        }
+        $(“toggle-co”).addEventListener(“click”, () => loadPositionDetail(posId, label, “companies”));
+        $(“toggle-li”).addEventListener(“click”, () => loadPositionDetail(posId, label, “listings”));
       } catch (err) { target.innerHTML = `❌ ${esc(err.message)}`; }
     }
 
@@ -435,6 +538,14 @@
         if (data.note) $("people-list").insertAdjacentHTML("beforebegin", `<div class="hint">${esc(data.note)}</div>`);
       } catch (err) { btn.disabled = false; btn.textContent = "🔎 Find leaders (CEO/Founder)"; alert(err.message); }
     }
+
+    // help drawer
+    const helpDrawer = $("help-drawer"), helpBg = $("help-bg");
+    function openHelp() { helpDrawer.classList.add("open"); helpBg.classList.add("open"); }
+    function closeHelp() { helpDrawer.classList.remove("open"); helpBg.classList.remove("open"); }
+    $("help-btn").addEventListener("click", openHelp);
+    $("help-close").addEventListener("click", closeHelp);
+    helpBg.addEventListener("click", closeHelp);
 
     // initial load
     switchTab("jobs");

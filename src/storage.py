@@ -21,6 +21,7 @@ only jobs added since the last run).
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Iterable, Sequence
 from datetime import UTC, datetime
 
@@ -50,6 +51,27 @@ from .models import (
 )
 
 log = structlog.get_logger(__name__)
+
+_SENIORITY_RE = re.compile(
+    r"^(senior|sr\.?|junior|jr\.?|lead|staff|principal|associate|"
+    r"mid[\s\-]?level|entry[\s\-]?level|head\s+of|vp\s+of|director\s+of|chief)\s+",
+    re.IGNORECASE,
+)
+
+
+def normalize_position_keyword(kw: str) -> str:
+    """Strip common seniority/level prefixes for position dedup.
+
+    "Senior Python Developer" and "Python Developer" normalize to the same
+    keyword and are stored under a single position row.
+    """
+    base = kw.strip().lower()
+    text = base
+    prev = None
+    while prev != text:
+        prev = text
+        text = _SENIORITY_RE.sub("", text).strip()
+    return text if text else base
 
 
 class Base(DeclarativeBase):
@@ -440,7 +462,7 @@ class Storage:
         self, session: AsyncSession, *, keyword: str, location: str | None, now: datetime
     ) -> PositionRecord:
         """Find a position by (normalized keyword, location) or create it."""
-        norm = keyword.strip().lower()
+        norm = normalize_position_keyword(keyword)
         loc = location or None
         loc_cond = (
             PositionRecord.location.is_(None) if loc is None else PositionRecord.location == loc
@@ -610,6 +632,17 @@ class Storage:
                 )
             ).all()
             return [rec.to_listing() for rec in records]
+
+    async def get_listings_for_position(self, position_id: int) -> list[JobListing]:
+        """Return all listings saved under a position, newest-first."""
+        stmt = (
+            select(JobRecord)
+            .where(JobRecord.position_id == position_id)
+            .order_by(JobRecord.posted_at.desc().nullslast())
+        )
+        async with self._session() as session:
+            rows: Sequence[JobRecord] = (await session.scalars(stmt)).all()
+            return [row.to_listing() for row in rows]
 
     async def get_listing(self, job_id: str) -> JobListing | None:
         """A single listing by ``job_id``, or ``None``."""

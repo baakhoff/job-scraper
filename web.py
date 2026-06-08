@@ -51,7 +51,8 @@ class SearchRequest(BaseModel):
     geo_id: str | None = Field(None, description="LinkedIn geoId (more reliable than location).")
     workplace_type: WorkplaceType | None = Field(None, description="remote / hybrid / on_site.")
     max_results: int = Field(25, ge=1, le=200, description="How many listings to fetch.")
-    details: bool = Field(False, description="Fetch each job's detail page (slower).")
+    details: bool = Field(True, description="Fetch each job's detail page (slower).")
+    posted_within_seconds: int | None = Field(None, description="Only jobs posted within N seconds.")
 
 
 # --------------------------------------------------------------------------- #
@@ -147,6 +148,7 @@ async def api_search(req: SearchRequest) -> dict[str, object]:
         location=req.location or None,
         geo_id=req.geo_id or None,
         workplace_type=req.workplace_type,
+        posted_within_seconds=req.posted_within_seconds,
     )
     listings = await _run_search(params, req.max_results, with_details=req.details)
     async with Storage() as storage:
@@ -170,13 +172,14 @@ async def api_companies_search(req: SearchRequest) -> dict[str, object]:
         location=req.location or None,
         geo_id=req.geo_id or None,
         workplace_type=req.workplace_type,
+        posted_within_seconds=req.posted_within_seconds,
     )
     listings = await _run_search(params, req.max_results, with_details=req.details)
     async with Storage() as storage:
         counts = await storage.save_search_results(
             listings, keyword=req.keywords, location=params.location
         )
-        position_id = int(counts["position_id"])
+        position_id = counts["position_id"]
         companies = await storage.get_companies_for_position(position_id)
     return {
         "count": len(companies),
@@ -203,6 +206,14 @@ async def api_position_companies(position_id: int) -> dict[str, object]:
     async with Storage() as storage:
         companies = await storage.get_companies_for_position(position_id)
     return {"count": len(companies), "companies": [_company_to_dict(c) for c in companies]}
+
+
+@app.get("/api/positions/{position_id}/listings")
+async def api_position_listings(position_id: int) -> dict[str, object]:
+    """Job listings saved under a position."""
+    async with Storage() as storage:
+        listings = await storage.get_listings_for_position(position_id)
+    return {"count": len(listings), "listings": [_job_to_dict(j) for j in listings]}
 
 
 @app.get("/api/companies")
