@@ -8,6 +8,22 @@ from __future__ import annotations
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# A small pool of realistic desktop browser User-Agents. The scraper rotates
+# through these per request so traffic doesn't look like a single client
+# hammering the endpoint. Keep them current-ish; very old UAs get blocked.
+DEFAULT_USER_AGENTS: list[str] = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:124.0) "
+    "Gecko/20100101 Firefox/124.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 "
+    "(KHTML, like Gecko) Version/17.4 Safari/605.1.15",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+]
+
 
 class Config(BaseSettings):
     """Application configuration."""
@@ -17,15 +33,15 @@ class Config(BaseSettings):
     # --- search defaults ---
     default_keywords: str = "python"
     default_location: str | None = None
+    max_results: int = 75
 
     # --- politeness / rate limiting ---
-    request_delay_seconds: float = 2.0
-    request_jitter_seconds: float = 1.0
+    # Random delay between requests is drawn uniformly from [min, max].
+    request_delay_min: float = 2.0
+    request_delay_max: float = 5.0
     max_pages: int = 40
-    user_agent: str = (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
-    )
+    max_retries: int = 4
+    user_agents: list[str] = DEFAULT_USER_AGENTS
 
     # --- output ---
     db_path: str = "output/jobs.db"

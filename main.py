@@ -3,70 +3,190 @@
 Wires together the scraper -> parser -> filters -> storage pipeline behind a
 small command-line interface.
 
-    python main.py search "python backend" --location "Berlin"
-    python main.py list
+    python main.py search --keywords "python backend" --location "Berlin"
+    python main.py list --keyword remote
+    python main.py new
 """
 
 from __future__ import annotations
 
 import asyncio
+import sys
+from datetime import UTC, datetime
+from pathlib import Path
 
 import typer
+from rich.console import Console
+from rich.table import Table
 
 from config import config
-from src.filters import dedupe
-from src.models import JobListing, SearchParams
+from src.filters import (
+    dedupe,
+    filter_by_workplace_type,
+    sort_by_posted_desc,
+)
+from src.models import JobListing, SearchParams, WorkplaceType
 from src.parser import parse_search_html
 from src.scraper import LinkedInScraper, RateLimiter
 from src.storage import Storage
 
-app = typer.Typer(help="Scrape and parse public LinkedIn job listings.")
 
+def _force_utf8_stdio() -> None:
+    """Switch stdio to UTF-8 with a replacement fallback.
 
-async def _run_search(params: SearchParams) -> list[JobListing]:
-    """Drive the async scraper/parser pipeline for one search.
-
-    Stub: iterate scraper pages, parse each to raw dicts, build ``JobListing``
-    models, dedupe, and return them.
+    Windows consoles often default to cp1252, which can't encode characters
+    that show up in real job titles/locations (accents, em dashes), so output
+    would otherwise crash the run.
     """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(encoding="utf-8", errors="replace")
+
+
+_force_utf8_stdio()
+
+app = typer.Typer(help="Scrape and parse public LinkedIn job listings.")
+console = Console()
+
+# Marker file holding the timestamp of the last ``new`` check, so the command
+# can report only listings added since then (drives a Telegram poller).
+_LAST_CHECK_FILE = Path(config.db_path).with_name(".last_new_check")
+
+
+async def _run_search(params: SearchParams, max_results: int) -> list[JobListing]:
+    """Drive the async scraper/parser pipeline for one search."""
     rate_limiter = RateLimiter(
-        delay_seconds=config.request_delay_seconds,
-        jitter_seconds=config.request_jitter_seconds,
+        delay_min=config.request_delay_min,
+        delay_max=config.request_delay_max,
     )
     async with LinkedInScraper(
         rate_limiter=rate_limiter,
-        user_agent=config.user_agent,
+        user_agents=config.user_agents,
         max_pages=config.max_pages,
+        max_results=max_results,
+        max_retries=config.max_retries,
     ) as scraper:
         listings: list[JobListing] = []
         async for html in scraper.iter_pages(params):
-            raw = parse_search_html(html)
-            listings.extend(JobListing.from_raw(item) for item in raw)
-        return dedupe(listings)
+            for raw in parse_search_html(html):
+                try:
+                    listings.append(JobListing.from_raw(raw))
+                except Exception as exc:  # parse/validation failures are operational
+                    console.print(f"[yellow]skipped a card:[/yellow] {exc}")
+        return sort_by_posted_desc(dedupe(listings))[:max_results]
+
+
+def _render_table(listings: list[JobListing], title: str) -> None:
+    """Print listings as a rich table."""
+    if not listings:
+        console.print(f"[yellow]No listings to show for: {title}[/yellow]")
+        return
+
+    table = Table(title=title, show_lines=False, expand=True)
+    table.add_column("Posted", style="dim", no_wrap=True)
+    table.add_column("Title", style="bold cyan")
+    table.add_column("Company", style="green")
+    table.add_column("Location")
+    table.add_column("Type", no_wrap=True)
+
+    for job in listings:
+        posted = job.posted_at.date().isoformat() if job.posted_at else "-"
+        wtype = job.workplace_type.value.replace("_", "-") if job.workplace_type else "-"
+        table.add_row(posted, job.title, job.company, job.location or "-", wtype)
+
+    console.print(table)
+    console.print(f"[dim]{len(listings)} listing(s).[/dim]")
 
 
 @app.command()
 def search(
-    keywords: str = typer.Argument(..., help="Search keywords, e.g. 'python backend'."),
-    location: str = typer.Option(None, help="Location filter."),
+    keywords: str = typer.Option(..., "--keywords", "-k", help="Search keywords."),
+    location: str = typer.Option(None, "--location", "-l", help="Location filter."),
     geo_id: str = typer.Option(None, help="LinkedIn geoId (more reliable than location)."),
+    workplace_type: WorkplaceType = typer.Option(
+        None, "--workplace-type", "-w", help="remote / hybrid / on_site."
+    ),
+    max_results: int = typer.Option(
+        config.max_results, "--max-results", "-n", help="Max listings to fetch."
+    ),
 ) -> None:
-    """Run a job search and persist the results to the database."""
-    params = SearchParams(keywords=keywords, location=location, geo_id=geo_id)
-    listings = asyncio.run(_run_search(params))
+    """Run a job search, persist the results, and print them as a table."""
+    params = SearchParams(
+        keywords=keywords, location=location, geo_id=geo_id, workplace_type=workplace_type
+    )
+    console.print(
+        f"[bold]Searching[/bold] '{keywords}'"
+        + (f" in '{location}'" if location else "")
+        + f" (up to {max_results})..."
+    )
+    listings = asyncio.run(_run_search(params, max_results))
+
+    if workplace_type is not None:
+        listings = filter_by_workplace_type(listings, [workplace_type])
 
     storage = Storage(config.db_path)
-    storage.init_db()
-    written = storage.upsert_many(listings)
-    typer.echo(f"Stored {written} listing(s) to {config.db_path}.")
+    new_count = storage.save_jobs(listings)
+
+    _render_table(listings, f"Results for '{keywords}'")
+    console.print(
+        f"[green]Stored {len(listings)} listing(s)[/green] "
+        f"([bold]{new_count}[/bold] new) -> {config.db_path}"
+    )
 
 
 @app.command(name="list")
-def list_jobs() -> None:
+def list_jobs(
+    keyword: str = typer.Option(None, "--keyword", "-k", help="Filter by title/company substring."),
+    workplace_type: WorkplaceType = typer.Option(
+        None, "--workplace-type", "-w", help="remote / hybrid / on_site."
+    ),
+    limit: int = typer.Option(50, "--limit", "-n", help="Max rows to show."),
+) -> None:
     """List job listings already stored in the database."""
     storage = Storage(config.db_path)
-    for listing in storage.all_listings():
-        typer.echo(f"{listing.job_id}\t{listing.title} @ {listing.company}")
+    listings = storage.get_jobs(keyword=keyword, workplace_type=workplace_type, limit=limit)
+    _render_table(listings, "Saved listings")
+
+
+@app.command()
+def new(
+    reset: bool = typer.Option(
+        False, "--reset", help="Reset the marker to now without showing results."
+    ),
+) -> None:
+    """Show jobs added since the last ``new`` check (Telegram integration hook).
+
+    Reads the timestamp of the previous check, prints everything first seen
+    after it, then advances the marker to now.
+    """
+    storage = Storage(config.db_path)
+    now = datetime.now(UTC)
+
+    if reset:
+        _write_last_check(now)
+        console.print("[green]Marker reset to now.[/green]")
+        return
+
+    since = _read_last_check()
+    listings = storage.get_new_jobs(since)
+    _render_table(listings, f"New since {since.isoformat(timespec='seconds')}")
+    _write_last_check(now)
+
+
+def _read_last_check() -> datetime:
+    """Read the last-check timestamp; default to epoch on first run."""
+    try:
+        raw = _LAST_CHECK_FILE.read_text(encoding="utf-8").strip()
+        return datetime.fromisoformat(raw)
+    except (OSError, ValueError):
+        return datetime.fromtimestamp(0, tz=UTC)
+
+
+def _write_last_check(when: datetime) -> None:
+    """Persist the last-check timestamp marker."""
+    _LAST_CHECK_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _LAST_CHECK_FILE.write_text(when.isoformat(), encoding="utf-8")
 
 
 if __name__ == "__main__":
