@@ -21,6 +21,7 @@ only jobs added since the last run).
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Iterable, Sequence
 from datetime import UTC, datetime
 
@@ -50,6 +51,26 @@ from .models import (
 )
 
 log = structlog.get_logger(__name__)
+
+_SENIORITY_RE = re.compile(
+    r"^(senior|sr\.?|junior|jr\.?|lead|staff|principal|associate|"
+    r"mid[\s\-]?level|entry[\s\-]?level|head\s+of|vp\s+of|director\s+of|chief)\s+",
+    re.IGNORECASE,
+)
+
+
+def normalize_position_keyword(kw: str) -> str:
+    """Strip common seniority/level prefixes for position dedup.
+
+    "Senior Python Developer" and "Python Developer" normalize to the same
+    keyword and are stored under a single position row.
+    """
+    text = kw.strip().lower()
+    prev = None
+    while prev != text:
+        prev = text
+        text = _SENIORITY_RE.sub("", text).strip()
+    return text
 
 
 class Base(DeclarativeBase):
@@ -440,7 +461,7 @@ class Storage:
         self, session: AsyncSession, *, keyword: str, location: str | None, now: datetime
     ) -> PositionRecord:
         """Find a position by (normalized keyword, location) or create it."""
-        norm = keyword.strip().lower()
+        norm = normalize_position_keyword(keyword)
         loc = location or None
         loc_cond = (
             PositionRecord.location.is_(None) if loc is None else PositionRecord.location == loc
