@@ -137,7 +137,7 @@ class LinkedInScraper:
             try:
                 response = await self._client.get(url, headers=self._headers())
             except httpx.TransportError as exc:
-                log.warning("request_failed", error=str(exc), attempt=attempt)
+                log.warning("request_failed", context="page", key=str(params.start), error=str(exc), attempt=attempt)
                 await self.rate_limiter.backoff(attempt)
                 continue
 
@@ -151,7 +151,7 @@ class LinkedInScraper:
             response.raise_for_status()
             return response.text
 
-        log.error("max_retries_exceeded", start=params.start)
+        log.error("max_retries_exceeded", context="page", key=str(params.start))
         return ""
 
     async def iter_pages(self, params: SearchParams) -> AsyncIterator[str]:
