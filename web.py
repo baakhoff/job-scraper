@@ -51,7 +51,7 @@ class SearchRequest(BaseModel):
     geo_id: str | None = Field(None, description="LinkedIn geoId (more reliable than location).")
     workplace_type: WorkplaceType | None = Field(None, description="remote / hybrid / on_site.")
     max_results: int = Field(25, ge=1, le=200, description="How many listings to fetch.")
-    details: bool = Field(False, description="Fetch each job's detail page (slower).")
+    details: bool = Field(True, description="Fetch each job's detail page (slower).")
     posted_within_seconds: int | None = Field(None, description="Only jobs posted within N seconds.")
 
 
