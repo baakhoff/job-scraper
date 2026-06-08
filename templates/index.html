@@ -30,7 +30,7 @@
     form { display: grid; grid-template-columns: repeat(12, 1fr); gap: 12px; align-items: end; }
     .field { display: flex; flex-direction: column; gap: 6px; }
     .kw { grid-column: span 4; } .loc { grid-column: span 3; } .wt { grid-column: span 2; }
-    .num { grid-column: span 3; } .det { grid-column: span 4; } .go { grid-column: span 8; }
+    .dp { grid-column: span 2; } .num { grid-column: span 2; } .det { grid-column: span 4; } .go { grid-column: span 8; }
     label { font-size: 11px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .4px; }
     input[type=text], input[type=number], select { padding: 9px 11px; border: 1px solid var(--line);
       border-radius: 8px; font-size: 14px; background: #fff; color: var(--ink); width: 100%; }
@@ -147,6 +147,15 @@
             <option value="remote">Remote</option>
             <option value="hybrid">Hybrid</option>
             <option value="on_site">On-site</option>
+          </select>
+        </div>
+        <div class="field dp">
+          <label for="posted_within">Date posted</label>
+          <select id="posted_within">
+            <option value="">Any time</option>
+            <option value="86400">Past 24 h</option>
+            <option value="604800">Past week</option>
+            <option value="2592000">Past month</option>
           </select>
         </div>
         <div class="field num">
@@ -296,6 +305,7 @@
         keywords: $("keywords").value.trim(),
         location: $("location").value.trim() || null,
         workplace_type: $("workplace_type").value || null,
+        posted_within_seconds: Number($("posted_within").value) || null,
         max_results: Number($("max_results").value) || 25,
         details: $("details").checked,
       };

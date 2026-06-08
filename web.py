@@ -52,6 +52,7 @@ class SearchRequest(BaseModel):
     workplace_type: WorkplaceType | None = Field(None, description="remote / hybrid / on_site.")
     max_results: int = Field(25, ge=1, le=200, description="How many listings to fetch.")
     details: bool = Field(False, description="Fetch each job's detail page (slower).")
+    posted_within_seconds: int | None = Field(None, description="Only jobs posted within N seconds.")
 
 
 # --------------------------------------------------------------------------- #
@@ -147,6 +148,7 @@ async def api_search(req: SearchRequest) -> dict[str, object]:
         location=req.location or None,
         geo_id=req.geo_id or None,
         workplace_type=req.workplace_type,
+        posted_within_seconds=req.posted_within_seconds,
     )
     listings = await _run_search(params, req.max_results, with_details=req.details)
     async with Storage() as storage:
@@ -170,6 +172,7 @@ async def api_companies_search(req: SearchRequest) -> dict[str, object]:
         location=req.location or None,
         geo_id=req.geo_id or None,
         workplace_type=req.workplace_type,
+        posted_within_seconds=req.posted_within_seconds,
     )
     listings = await _run_search(params, req.max_results, with_details=req.details)
     async with Storage() as storage:
