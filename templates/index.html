@@ -103,12 +103,23 @@
     .person .nm { font-weight: 600; font-size: 14px; }
     .person .hl { font-size: 12.5px; color: var(--muted); }
     footer { text-align: center; color: var(--muted); font-size: 12px; padding: 24px; }
+    .help-drawer { width: min(640px, 94vw); }
+    .help-drawer h3 { margin: 14px 0 6px; font-size: 14px; }
+    .help-drawer p, .help-drawer li { font-size: 13.5px; color: var(--ink); line-height: 1.6; }
+    .help-drawer ul { padding-left: 18px; margin: 4px 0; }
+    .help-btn { margin-left: auto; background: rgba(255,255,255,.15); color: #fff;
+      border-radius: 50%; width: 28px; height: 28px; padding: 0; font-size: 13px;
+      font-weight: 700; border: none; cursor: pointer; }
+    .help-btn:hover { background: rgba(255,255,255,.3); }
   </style>
 </head>
 <body>
-  <header>
-    <h1>LinkedIn Job Parser</h1>
-    <p>Search public LinkedIn jobs — discover companies hiring per role, and explore your saved data.</p>
+  <header style="display:flex;justify-content:space-between;align-items:start">
+    <div>
+      <h1>LinkedIn Job Parser</h1>
+      <p>Search public LinkedIn jobs — discover companies hiring per role, and explore your saved data.</p>
+    </div>
+    <button class="help-btn" id="help-btn" title="Help / Documentation">?</button>
   </header>
 
   <main class="wrap">
@@ -177,6 +188,54 @@
   </aside>
 
   <footer>linkedin-job-parser · public data only · for personal, low-volume use</footer>
+
+  <!-- help / documentation drawer -->
+  <div class="drawer-bg" id="help-bg"></div>
+  <aside class="drawer help-drawer" id="help-drawer">
+    <div class="drawer-head">
+      <button class="drawer-close" id="help-close">✕ Close</button>
+      <h2>How to use</h2>
+      <div class="sub">LinkedIn Job Parser — public data only</div>
+    </div>
+    <div class="drawer-body">
+      <div class="section">
+        <h3>What this is</h3>
+        <p>Scrapes <strong>public</strong> LinkedIn job postings (no login, no API key). Results are saved to a local database (deduped). Intended for personal, low-volume use only — please respect LinkedIn's Terms of Service.</p>
+      </div>
+      <div class="section">
+        <h3>Tabs</h3>
+        <ul>
+          <li><strong>Jobs</strong> — search LinkedIn and save listings. Each search appends new results; duplicates are skipped.</li>
+          <li><strong>Companies</strong> — run a search and see which companies are hiring for that role, grouped by employer. Use <em>Show saved</em> to browse without a new scrape.</li>
+          <li><strong>Explore</strong> — browse all your saved positions and companies without hitting LinkedIn. Click a position to see who's hiring. Use <em>Search more</em> to fetch fresh results for any saved position.</li>
+        </ul>
+      </div>
+      <div class="section">
+        <h3>Search tips</h3>
+        <ul>
+          <li><strong>Keywords</strong> — job title, skills, or role (e.g. "python developer", "data scientist").</li>
+          <li><strong>Location</strong> — city, country, or "Remote". LinkedIn is fuzzy here; leave blank for worldwide.</li>
+          <li><strong>Workplace</strong> — filter to Remote, Hybrid, or On-site only.</li>
+          <li><strong>Date posted</strong> — limit to jobs posted in the last 24 h / week / month.</li>
+          <li><strong>Max results</strong> — up to 200 (each page is 25 listings, so 200 = 8 pages).</li>
+          <li><strong>Fetch full details</strong> — fetches each job's detail page for seniority, employment type, full description, and applicant count. Slower (one extra request per listing) but richer data.</li>
+        </ul>
+      </div>
+      <div class="section">
+        <h3>Positions &amp; normalization</h3>
+        <p>Searches are grouped into <em>positions</em> by keyword + location. Common seniority prefixes (Senior, Junior, Lead, etc.) are stripped, so "Senior Python Developer" and "Python Developer" land in the same position group.</p>
+      </div>
+      <div class="section">
+        <h3>Limitations</h3>
+        <ul>
+          <li><strong>Rate limiting</strong> — LinkedIn blocks rapid requests. Searches include jittered delays (2–5 s per page) and automatic 429 backoff. A large search can take a minute.</li>
+          <li><strong>People search (Find leaders)</strong> — LinkedIn's public people search is login-gated. The button attempts a best-effort scrape but usually returns no results.</li>
+          <li><strong>Fragile selectors</strong> — LinkedIn changes its HTML markup without notice. If results are empty or fields are missing, selectors in <code>src/parser.py</code> may need updating.</li>
+          <li><strong>Public data only</strong> — no private profiles, no messages, no company internal data.</li>
+        </ul>
+      </div>
+    </div>
+  </aside>
 
   <script>
     const $ = (id) => document.getElementById(id);
@@ -435,6 +494,14 @@
         if (data.note) $("people-list").insertAdjacentHTML("beforebegin", `<div class="hint">${esc(data.note)}</div>`);
       } catch (err) { btn.disabled = false; btn.textContent = "🔎 Find leaders (CEO/Founder)"; alert(err.message); }
     }
+
+    // help drawer
+    const helpDrawer = $("help-drawer"), helpBg = $("help-bg");
+    function openHelp() { helpDrawer.classList.add("open"); helpBg.classList.add("open"); }
+    function closeHelp() { helpDrawer.classList.remove("open"); helpBg.classList.remove("open"); }
+    $("help-btn").addEventListener("click", openHelp);
+    $("help-close").addEventListener("click", closeHelp);
+    helpBg.addEventListener("click", closeHelp);
 
     // initial load
     switchTab("jobs");
