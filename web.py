@@ -48,6 +48,7 @@ class SearchRequest(BaseModel):
 
     keywords: str = Field(..., min_length=1, description="What to search for.")
     location: str | None = Field(None, description="Optional location filter.")
+    geo_id: str | None = Field(None, description="LinkedIn geoId (more reliable than location).")
     workplace_type: WorkplaceType | None = Field(None, description="remote / hybrid / on_site.")
     max_results: int = Field(25, ge=1, le=200, description="How many listings to fetch.")
     details: bool = Field(False, description="Fetch each job's detail page (slower).")
@@ -142,7 +143,10 @@ async def api_search(req: SearchRequest) -> dict[str, object]:
     Hits LinkedIn's public endpoint and is rate-limited, so it can take a while.
     """
     params = SearchParams(
-        keywords=req.keywords, location=req.location or None, workplace_type=req.workplace_type
+        keywords=req.keywords,
+        location=req.location or None,
+        geo_id=req.geo_id or None,
+        workplace_type=req.workplace_type,
     )
     listings = await _run_search(params, req.max_results, with_details=req.details)
     async with Storage() as storage:
@@ -162,7 +166,10 @@ async def api_search(req: SearchRequest) -> dict[str, object]:
 async def api_companies_search(req: SearchRequest) -> dict[str, object]:
     """Run a search and return the companies hiring for that position."""
     params = SearchParams(
-        keywords=req.keywords, location=req.location or None, workplace_type=req.workplace_type
+        keywords=req.keywords,
+        location=req.location or None,
+        geo_id=req.geo_id or None,
+        workplace_type=req.workplace_type,
     )
     listings = await _run_search(params, req.max_results, with_details=req.details)
     async with Storage() as storage:

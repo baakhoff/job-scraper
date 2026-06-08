@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import random
+import re
 from collections.abc import AsyncIterator, Sequence
 
 import httpx
@@ -179,10 +180,10 @@ class LinkedInScraper:
                 log.info("empty_page_stop", page=page, start=start)
                 break
 
-            # Cheap card count (one <li> per card) — drives both the max_results
-            # gate and the offset stride. A non-empty page with no cards means
-            # we've run off the end of the usable result set.
-            cards = stripped.count("<li")
+            # Count <li> tags to drive the max_results gate and offset stride.
+            # Use a regex word-boundary match so <link> tags are not mistaken
+            # for job-card <li> elements (both start with the literal "<li").
+            cards = len(re.findall(r"<li\b", stripped))
             if cards == 0:
                 log.info("no_cards_stop", page=page, start=start)
                 break
@@ -250,7 +251,7 @@ class LinkedInScraper:
             try:
                 response = await self._client.get(url, headers=self._headers())
             except httpx.TransportError as exc:
-                log.warning(f"{context}_request_failed", key=key, error=str(exc), attempt=attempt)
+                log.warning("request_failed", context=context, key=key, error=str(exc), attempt=attempt)
                 await self.rate_limiter.backoff(attempt)
                 continue
 
@@ -258,10 +259,10 @@ class LinkedInScraper:
                 await self.rate_limiter.backoff(attempt)
                 continue
             if response.status_code in (400, 404, 999):
-                log.info(f"{context}_unavailable", key=key, status=response.status_code)
+                log.info("endpoint_unavailable", context=context, key=key, status=response.status_code)
                 return ""
             response.raise_for_status()
             return response.text
 
-        log.error(f"{context}_max_retries_exceeded", key=key)
+        log.error("max_retries_exceeded", context=context, key=key)
         return ""
