@@ -205,6 +205,14 @@ async def api_position_companies(position_id: int) -> dict[str, object]:
     return {"count": len(companies), "companies": [_company_to_dict(c) for c in companies]}
 
 
+@app.get("/api/positions/{position_id}/listings")
+async def api_position_listings(position_id: int) -> dict[str, object]:
+    """Job listings saved under a position."""
+    async with Storage() as storage:
+        listings = await storage.get_listings_for_position(position_id)
+    return {"count": len(listings), "listings": [_job_to_dict(j) for j in listings]}
+
+
 @app.get("/api/companies")
 async def api_companies(keyword: str | None = None, limit: int = 200) -> dict[str, object]:
     """All stored companies (optional name filter)."""
