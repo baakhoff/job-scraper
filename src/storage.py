@@ -1,12 +1,21 @@
-"""Persistence layer: store parsed listings in SQLite via SQLAlchemy.
+"""Persistence layer: store parsed listings via async SQLAlchemy.
 
-Uses the SQLAlchemy 2.0 declarative API. The schema is intentionally close
-to ``models.JobListing``; ``job_id`` is the natural primary key so re-runs
-upsert rather than duplicate.
+Uses the SQLAlchemy 2.0 *async* API. Two backends are supported through the
+same code path:
 
-A ``first_seen_at`` column records when a row was *first* inserted, which is
-what powers :meth:`Storage.get_new_jobs` (used by the Telegram notification
-hook to surface only jobs added since the last run).
+* **PostgreSQL** (``postgresql+asyncpg://``) — the Docker / production target.
+* **SQLite** (``sqlite+aiosqlite://``) — the zero-setup local-dev fallback.
+
+The backend is chosen by URL (see :func:`resolve_database_url`): the
+``DATABASE_URL`` environment variable wins, then ``config.database_url``. A bare
+filesystem path (as the tests and the old ``LJP_DB_PATH`` pass) is treated as a
+SQLite file for backwards compatibility.
+
+The schema is intentionally close to ``models.JobListing``; ``job_id`` is the
+natural primary key so re-runs upsert rather than duplicate. A ``first_seen_at``
+column records when a row was *first* inserted, which powers
+:meth:`Storage.get_new_jobs` (used by the Telegram notification hook to surface
+only jobs added since the last run).
 """
 
 from __future__ import annotations
@@ -16,9 +25,9 @@ from collections.abc import Iterable, Sequence
 from datetime import UTC, datetime
 
 import structlog
-from sqlalchemy import DateTime, Integer, String, create_engine, select, text
-from sqlalchemy.engine import Engine
-from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
+from sqlalchemy import Connection, DateTime, Integer, String, select, text
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from .models import JobListing, WorkplaceType
 
@@ -78,48 +87,90 @@ class JobRecord(Base):
 JobListingORM = JobRecord
 
 
-class Storage:
-    """Thin wrapper around a SQLAlchemy engine for reading/writing listings."""
+def resolve_database_url(source: str | None = None) -> str:
+    """Resolve the SQLAlchemy URL to use, normalizing to an async driver.
 
-    def __init__(self, db_path: str) -> None:
-        # Ensure the parent directory (e.g. ``output/``) exists before SQLite
-        # tries to create the file.
-        parent = os.path.dirname(db_path)
+    Precedence: explicit ``source`` argument, then the ``DATABASE_URL``
+    environment variable (set by Docker Compose), then ``config.database_url``.
+
+    Values are normalized so callers can pass either a full URL or — for
+    backwards compatibility with the old ``LJP_DB_PATH`` and the test suite — a
+    bare SQLite filesystem path. Sync drivers are upgraded to their async
+    equivalents (``postgresql://`` → ``postgresql+asyncpg://``, ``sqlite://`` →
+    ``sqlite+aiosqlite://``) so the async engine can use them.
+    """
+    raw = source or os.getenv("DATABASE_URL")
+    if not raw:
+        # Imported lazily to avoid a hard import-time dependency on the config
+        # module (keeps storage usable in isolation / tests).
+        from config import config
+
+        raw = config.database_url
+
+    if "://" not in raw:
+        # A bare path like ``output/jobs.db`` — treat as a local SQLite file.
+        return f"sqlite+aiosqlite:///{raw}"
+
+    scheme, rest = raw.split("://", 1)
+    if scheme == "postgresql" or scheme == "postgres":
+        return f"postgresql+asyncpg://{rest}"
+    if scheme == "sqlite":
+        return f"sqlite+aiosqlite://{rest}"
+    return raw
+
+
+class Storage:
+    """Async wrapper around a SQLAlchemy engine for reading/writing listings.
+
+    Usable as an async context manager, which initializes the schema on entry
+    and disposes the engine on exit::
+
+        async with Storage() as storage:
+            await storage.save_jobs(listings)
+    """
+
+    def __init__(self, url: str | None = None) -> None:
+        self.url = resolve_database_url(url)
+        if self.url.startswith("sqlite") and ":memory:" not in self.url:
+            self._ensure_sqlite_parent_dir()
+        self.engine: AsyncEngine = create_async_engine(self.url)
+
+    def _ensure_sqlite_parent_dir(self) -> None:
+        """Create the parent directory for a SQLite file before the engine opens it."""
+        # ``sqlite+aiosqlite:///output/jobs.db`` -> ``output/jobs.db``.
+        path = self.url.split("///", 1)[-1]
+        parent = os.path.dirname(path)
         if parent:
             os.makedirs(parent, exist_ok=True)
-        self.engine: Engine = create_engine(f"sqlite:///{db_path}")
-        self.init_db()
 
-    def init_db(self) -> None:
-        """Create tables if absent, then add any columns missing on old DBs.
+    async def __aenter__(self) -> Storage:
+        await self.init_db()
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        await self.dispose()
+
+    async def dispose(self) -> None:
+        """Release the engine's connection pool."""
+        await self.engine.dispose()
+
+    async def init_db(self) -> None:
+        """Create tables if absent, then patch any columns missing on old DBs.
 
         ``create_all`` only creates whole tables — it will not add a column to a
-        pre-existing ``job_listings`` table. So after creating, we diff the live
-        schema against the model and ``ALTER TABLE ADD COLUMN`` the gaps. This
-        lets a database from an earlier schema pick up new fields (company_url,
-        employment_type, …) without a manual migration or a data wipe.
+        pre-existing ``job_listings`` table. So on SQLite (the long-lived local
+        dev file) we additionally diff the live schema against the model and
+        ``ALTER TABLE ADD COLUMN`` the gaps, letting an older database pick up
+        new fields without a manual migration or a data wipe. On Postgres we
+        rely on ``create_all`` for first-run init (and Alembic for anything
+        beyond that, should the project grow it).
         """
-        Base.metadata.create_all(self.engine)
-        self._add_missing_columns()
+        async with self.engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+            if self.engine.dialect.name == "sqlite":
+                await conn.run_sync(_add_missing_sqlite_columns)
 
-    def _add_missing_columns(self) -> None:
-        """Lightweight forward-only migration: add model columns absent from SQLite."""
-        table_name = JobRecord.__tablename__
-        with self.engine.begin() as conn:
-            existing = {
-                row[1]  # PRAGMA table_info: (cid, name, type, ...)
-                for row in conn.execute(text(f'PRAGMA table_info("{table_name}")'))
-            }
-            for column in JobRecord.__table__.columns:
-                if column.name in existing:
-                    continue
-                col_type = column.type.compile(self.engine.dialect)
-                conn.execute(
-                    text(f'ALTER TABLE "{table_name}" ADD COLUMN "{column.name}" {col_type}')
-                )
-                log.info("schema_column_added", column=column.name)
-
-    def save_jobs(self, listings: Iterable[JobListing]) -> int:
+    async def save_jobs(self, listings: Iterable[JobListing]) -> int:
         """Insert or update listings keyed by ``job_id``; return rows newly inserted.
 
         Existing rows are updated in place (their ``first_seen_at`` is
@@ -129,24 +180,24 @@ class Storage:
         """
         now = datetime.now(UTC)
         new_count = 0
-        with Session(self.engine) as session:
+        async with AsyncSession(self.engine) as session:
             for listing in listings:
-                existing = session.get(JobRecord, listing.job_id)
+                existing = await session.get(JobRecord, listing.job_id)
                 if existing is None:
                     session.add(_to_record(listing, first_seen_at=now))
                     new_count += 1
                 else:
                     _update_record(existing, listing)
-            session.commit()
+            await session.commit()
         log.info("jobs_saved", new=new_count)
         return new_count
 
     # Back-compat alias used by the original scaffold wiring.
-    def upsert_many(self, listings: Iterable[JobListing]) -> int:
+    async def upsert_many(self, listings: Iterable[JobListing]) -> int:
         """Alias for :meth:`save_jobs`."""
-        return self.save_jobs(listings)
+        return await self.save_jobs(listings)
 
-    def get_jobs(
+    async def get_jobs(
         self,
         *,
         keyword: str | None = None,
@@ -171,11 +222,11 @@ class Storage:
         if limit is not None:
             stmt = stmt.limit(limit)
 
-        with Session(self.engine) as session:
-            rows: Sequence[JobRecord] = session.scalars(stmt).all()
+        async with AsyncSession(self.engine) as session:
+            rows: Sequence[JobRecord] = (await session.scalars(stmt)).all()
             return [row.to_listing() for row in rows]
 
-    def get_new_jobs(self, since: datetime) -> list[JobListing]:
+    async def get_new_jobs(self, since: datetime) -> list[JobListing]:
         """Return listings first seen strictly after ``since`` (for notifications)."""
         if since.tzinfo is None:
             since = since.replace(tzinfo=UTC)
@@ -184,13 +235,32 @@ class Storage:
             .where(JobRecord.first_seen_at > since)
             .order_by(JobRecord.first_seen_at.desc())
         )
-        with Session(self.engine) as session:
-            rows: Sequence[JobRecord] = session.scalars(stmt).all()
+        async with AsyncSession(self.engine) as session:
+            rows: Sequence[JobRecord] = (await session.scalars(stmt)).all()
             return [row.to_listing() for row in rows]
 
-    def all_listings(self) -> list[JobListing]:
+    async def all_listings(self) -> list[JobListing]:
         """Read every stored listing back as ``JobListing`` models."""
-        return self.get_jobs()
+        return await self.get_jobs()
+
+
+def _add_missing_sqlite_columns(conn: Connection) -> None:
+    """Lightweight forward-only migration: add model columns absent from SQLite.
+
+    Runs inside ``conn.run_sync`` (a plain sync :class:`Connection`) because
+    PRAGMA / ALTER introspection has no clean async-streaming equivalent.
+    """
+    table_name = JobRecord.__tablename__
+    existing = {
+        row[1]  # PRAGMA table_info: (cid, name, type, ...)
+        for row in conn.execute(text(f'PRAGMA table_info("{table_name}")'))
+    }
+    for column in JobRecord.__table__.columns:
+        if column.name in existing:
+            continue
+        col_type = column.type.compile(conn.dialect)
+        conn.execute(text(f'ALTER TABLE "{table_name}" ADD COLUMN "{column.name}" {col_type}'))
+        log.info("schema_column_added", column=column.name)
 
 
 def _to_record(listing: JobListing, *, first_seen_at: datetime) -> JobRecord:

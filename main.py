@@ -87,6 +87,41 @@ async def _run_search(
         return listings
 
 
+async def _persist(listings: list[JobListing]) -> tuple[int, str]:
+    """Save listings to the configured database; return (new count, target label)."""
+    async with Storage() as storage:
+        new_count = await storage.save_jobs(listings)
+        return new_count, _redact_url(storage.url)
+
+
+async def _load_jobs(
+    *, keyword: str | None = None, workplace_type: WorkplaceType | None = None, limit: int | None
+) -> list[JobListing]:
+    """Read stored listings from the configured database."""
+    async with Storage() as storage:
+        return await storage.get_jobs(
+            keyword=keyword, workplace_type=workplace_type, limit=limit
+        )
+
+
+async def _load_new_jobs(since: datetime) -> list[JobListing]:
+    """Read listings first seen since ``since`` from the configured database."""
+    async with Storage() as storage:
+        return await storage.get_new_jobs(since)
+
+
+def _redact_url(url: str) -> str:
+    """Mask any password in a SQLAlchemy URL before printing it."""
+    if "://" not in url or "@" not in url:
+        return url
+    scheme, rest = url.split("://", 1)
+    creds, host = rest.split("@", 1)
+    if ":" in creds:
+        user = creds.split(":", 1)[0]
+        creds = f"{user}:***"
+    return f"{scheme}://{creds}@{host}"
+
+
 async def _enrich_with_details(
     scraper: LinkedInScraper, listings: list[JobListing]
 ) -> list[JobListing]:
@@ -171,13 +206,12 @@ def search(
     if workplace_type is not None:
         listings = filter_by_workplace_type(listings, [workplace_type])
 
-    storage = Storage(config.db_path)
-    new_count = storage.save_jobs(listings)
+    new_count, target = asyncio.run(_persist(listings))
 
     _render_table(listings, f"Results for '{keywords}'")
     console.print(
         f"[green]Stored {len(listings)} listing(s)[/green] "
-        f"([bold]{new_count}[/bold] new) -> {config.db_path}"
+        f"([bold]{new_count}[/bold] new) -> {target}"
     )
 
 
@@ -190,8 +224,9 @@ def list_jobs(
     limit: int = typer.Option(50, "--limit", "-n", help="Max rows to show."),
 ) -> None:
     """List job listings already stored in the database."""
-    storage = Storage(config.db_path)
-    listings = storage.get_jobs(keyword=keyword, workplace_type=workplace_type, limit=limit)
+    listings = asyncio.run(
+        _load_jobs(keyword=keyword, workplace_type=workplace_type, limit=limit)
+    )
     _render_table(listings, "Saved listings")
 
 
@@ -206,7 +241,6 @@ def new(
     Reads the timestamp of the previous check, prints everything first seen
     after it, then advances the marker to now.
     """
-    storage = Storage(config.db_path)
     now = datetime.now(UTC)
 
     if reset:
@@ -215,7 +249,7 @@ def new(
         return
 
     since = _read_last_check()
-    listings = storage.get_new_jobs(since)
+    listings = asyncio.run(_load_new_jobs(since))
     _render_table(listings, f"New since {since.isoformat(timespec='seconds')}")
     _write_last_check(now)
 

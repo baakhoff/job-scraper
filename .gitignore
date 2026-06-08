@@ -61,6 +61,7 @@ venv.bak/
 *.sqlite3
 output/
 data/
+scripts/audit_results/
 
 # IDEs
 .idea/

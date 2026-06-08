@@ -1,6 +1,8 @@
 name: linkedin-job-parser
 
-# Shared build/runtime config for both services (same image, different command).
+# Shared build/runtime config for both worker services (same image, different
+# command). Both wait for Postgres to be healthy and talk to it over the compose
+# network via the ``DATABASE_URL`` below.
 x-ljp-common: &ljp-common
   build:
     context: .
@@ -10,12 +12,40 @@ x-ljp-common: &ljp-common
     - path: .env
       required: false
   environment:
-    # The DB lives on the named volume, not in the image layer.
+    # Async SQLAlchemy URL pointing at the bundled Postgres service. Set here
+    # (not just in .env) so it wins over any localhost value a developer keeps
+    # in .env for bare-CLI use. The host ``postgres`` is the service name below.
+    DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-ljp}:${POSTGRES_PASSWORD:-ljp}@postgres:5432/${POSTGRES_DB:-ljp}
+    # The local marker file (.last_new_check) lives on the named volume.
     LJP_DB_PATH: /data/jobs.db
   volumes:
     - jobs-db:/data
+  depends_on:
+    postgres:
+      condition: service_healthy
 
 services:
+  # PostgreSQL is the system of record. Data persists on the jobs-pgdata volume.
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-ljp}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ljp}
+      POSTGRES_DB: ${POSTGRES_DB:-ljp}
+    volumes:
+      - jobs-pgdata:/var/lib/postgresql/data
+    # Bound to localhost so a developer can inspect the DB, without exposing it
+    # to the wider network. Override POSTGRES_PORT if 5432 is already in use.
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-ljp} -d ${POSTGRES_DB:-ljp}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
   # One-shot / ad-hoc CLI runs. With no command it runs a single search built
   # from LJP_SEARCH_* env vars; override the command for other verbs, e.g.
   #   docker compose run --rm parser python main.py list --limit 20
@@ -30,6 +60,7 @@ services:
     profiles: ["scheduler"]
     command: ["/app/docker/scheduler.sh"]
     environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-ljp}:${POSTGRES_PASSWORD:-ljp}@postgres:5432/${POSTGRES_DB:-ljp}
       LJP_DB_PATH: /data/jobs.db
       LJP_SCHEDULE_INTERVAL: ${LJP_SCHEDULE_INTERVAL:-3600}
     restart: unless-stopped
@@ -41,5 +72,7 @@ services:
       start_period: 120s
 
 volumes:
-  # Persists the SQLite DB (and the `.last_new_check` marker) across restarts.
+  # Persists the local marker file (.last_new_check) across restarts.
   jobs-db:
+  # Persists the PostgreSQL data directory across restarts.
+  jobs-pgdata:

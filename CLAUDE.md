@@ -5,8 +5,9 @@ Guidance for working in this repository.
 ## What this is
 
 `linkedin-job-parser` scrapes **public** LinkedIn job postings and turns them
-into structured, filterable records stored in SQLite. It does **not** log in
-or use a LinkedIn account, cookies, or the official API.
+into structured, filterable records stored in a database (PostgreSQL under
+Docker, SQLite for local dev). It does **not** log in or use a LinkedIn account,
+cookies, or the official API.
 
 ## Architecture
 
@@ -19,7 +20,7 @@ A linear async pipeline, one stage per module:
 | Scrape  | `src/scraper.py`  | Async httpx fetcher, offset pagination, rate limiting.    |
 | Parse   | `src/parser.py`   | BeautifulSoup: job-card HTML → loosely-typed raw dicts.   |
 | Filter  | `src/filters.py`  | In-process narrowing: keywords, workplace type, dedupe.   |
-| Store   | `src/storage.py`  | SQLAlchemy 2.0 → SQLite, upsert keyed by `job_id`.        |
+| Store   | `src/storage.py`  | async SQLAlchemy 2.0 → Postgres/SQLite, upsert by `job_id`. |
 | CLI     | `main.py`         | Typer entrypoint wiring the pipeline together.            |
 
 Data flow: `SearchParams → scraper (HTML pages) → parser (raw dicts) →
@@ -41,8 +42,9 @@ validation); `JobListing.from_raw` is the one place that cleans and validates.
 ## Tech stack
 
 Python 3.11+, httpx (async), BeautifulSoup4 + lxml, pydantic v2 +
-pydantic-settings, SQLAlchemy 2.0 (SQLite), typer, structlog. Tooling: ruff
-(line length 100), mypy `--strict`, pytest (`asyncio_mode = auto`).
+pydantic-settings, async SQLAlchemy 2.0 (PostgreSQL via `asyncpg`, SQLite via
+`aiosqlite`), typer, structlog. Tooling: ruff (line length 100), mypy
+`--strict`, pytest (`asyncio_mode = auto`).
 
 ## Gotchas
 

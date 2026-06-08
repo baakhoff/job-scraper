@@ -46,5 +46,11 @@ class Config(BaseSettings):
     # --- output ---
     db_path: str = "output/jobs.db"
 
+    # --- database ---
+    # SQLAlchemy URL for the persistence layer. Defaults to a local async SQLite
+    # file for bare-CLI use; Docker overrides this with a Postgres asyncpg URL via
+    # the ``DATABASE_URL`` environment variable (read directly in src/storage.py).
+    database_url: str = "sqlite+aiosqlite:///./jobs.db"
+
 
 config = Config()
