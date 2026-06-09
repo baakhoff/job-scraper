@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -55,20 +55,21 @@ console = Console()
 _LAST_CHECK_FILE = Path(config.db_path).with_name(".last_new_check")
 
 
-async def _collect_listings(
+async def _stream_search_events(
     params: SearchParams,
     *,
     max_results: int | None = None,
     stop: Callable[[list[JobListing]], bool] | None = None,
     with_details: bool = False,
-) -> list[JobListing]:
-    """Shared scrape core: page, parse, dedupe, optionally enrich.
+) -> AsyncIterator[tuple[str, object]]:
+    """Scrape with progress: yield ``("log", message)`` per page, then ``("listings", list)``.
 
-    ``max_results`` caps the scraper's paging and trims the result; ``stop`` is
-    an optional predicate checked after each page (the batch search uses it to
-    stop once enough companies are gathered). Both :func:`_run_search` and
-    :func:`_run_search_collecting_companies` are thin wrappers so the scrape /
-    parse / enrich logic lives in exactly one place.
+    This is the single scrape core (paging, parse, dedupe, optional enrich) with
+    progress surfaced so callers can stream it to the UI. ``max_results`` caps
+    paging and trims; ``stop`` is an optional predicate checked after each page
+    (the batch search stops once enough companies are gathered). A client
+    disconnect cancels the awaiting scrape — the ``async with`` scraper tears
+    down — which is how an in-flight search is stopped.
     """
     rate_limiter = RateLimiter(
         delay_min=config.request_delay_min,
@@ -83,20 +84,45 @@ async def _collect_listings(
         accept_language=params.accept_language_header(),
     ) as scraper:
         listings: list[JobListing] = []
+        page = 0
         async for html in scraper.iter_pages(params):
+            page += 1
             for raw in parse_search_html(html):
                 try:
                     listings.append(JobListing.from_raw(raw))
                 except Exception as exc:  # parse/validation failures are operational
                     console.print(f"[yellow]skipped a card:[/yellow] {exc}")
+            companies = len({listing.company.lower() for listing in listings})
+            yield ("log", f"Page {page}: {len(listings)} listings, {companies} companies so far…")
             if stop is not None and stop(listings):
                 break
         listings = sort_by_posted_desc(dedupe(listings))
         if max_results is not None:
             listings = listings[:max_results]
-        if with_details:
+        if with_details and listings:
+            yield ("log", f"Fetching full details for {len(listings)} listings (slower)…")
             listings = await _enrich_with_details(scraper, listings)
-        return listings
+        yield ("listings", listings)
+
+
+async def _collect_listings(
+    params: SearchParams,
+    *,
+    max_results: int | None = None,
+    stop: Callable[[list[JobListing]], bool] | None = None,
+    with_details: bool = False,
+) -> list[JobListing]:
+    """Run :func:`_stream_search_events` to completion, returning just the listings.
+
+    Used by the non-streaming callers (CLI search, the plain JSON endpoints).
+    """
+    listings: list[JobListing] = []
+    async for kind, payload in _stream_search_events(
+        params, max_results=max_results, stop=stop, with_details=with_details
+    ):
+        if kind == "listings" and isinstance(payload, list):
+            listings = payload
+    return listings
 
 
 async def _run_search(

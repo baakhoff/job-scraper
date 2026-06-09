@@ -17,17 +17,19 @@ CLI behave identically (same rate limiting, same dedupe, same DB).
 
 from __future__ import annotations
 
+import json
+from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 
 import uvicorn
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 from config import config
 
 # Reuse the exact search pipeline the CLI runs.
-from main import _run_search, _run_search_collecting_companies
+from main import _run_search, _run_search_collecting_companies, _stream_search_events
 from src.export import rows_to_csv, rows_to_json
 from src.models import Company, CompanyPerson, JobListing, Position, SearchParams, WorkplaceType
 from src.parser import parse_company_html
@@ -252,6 +254,174 @@ async def api_search_batch(req: BatchSearchRequest) -> dict[str, object]:
                 }
             )
     return {"count": len(results), "results": results}
+
+
+# --------------------------------------------------------------------------- #
+# Streaming search (live progress + stoppable)                                #
+# --------------------------------------------------------------------------- #
+def _ndjson(obj: dict[str, object]) -> bytes:
+    """Serialize one event as a newline-delimited JSON record."""
+    return (json.dumps(obj) + "\n").encode()
+
+
+def _stream_params(req: SearchRequest) -> SearchParams:
+    return SearchParams(
+        keywords=req.keywords,
+        location=req.location or None,
+        geo_id=req.geo_id or None,
+        workplace_type=req.workplace_type,
+        posted_within_seconds=req.posted_within_seconds,
+        language=req.language or None,
+    )
+
+
+# A finalize callback saves the scraped listings and builds the endpoint's
+# ``result`` event (jobs vs companies differ only here).
+_Finalize = Callable[["Storage", SearchParams, "list[JobListing]"], Awaitable[dict[str, object]]]
+
+
+def _stream_to_result(req: SearchRequest, opening: str, finalize: _Finalize) -> StreamingResponse:
+    """Shared NDJSON streamer for a single search: logs, then save+result.
+
+    Forwards per-page progress, then calls ``finalize`` to persist and produce
+    the ``result`` event. Any mid-stream failure is surfaced as an ``error``
+    event rather than a silently truncated stream. (``except Exception`` does
+    not catch ``CancelledError``, so a client-stop still tears the scrape down.)
+    """
+    params = _stream_params(req)
+
+    async def gen() -> AsyncIterator[bytes]:
+        try:
+            yield _ndjson({"type": "log", "message": opening})
+            listings: list[JobListing] = []
+            async for kind, payload in _stream_search_events(
+                params, max_results=req.max_results, with_details=req.details
+            ):
+                if kind == "log":
+                    yield _ndjson({"type": "log", "message": str(payload)})
+                elif isinstance(payload, list):
+                    listings = payload
+            yield _ndjson({"type": "log", "message": "Saving results…"})
+            async with Storage() as storage:
+                event = await finalize(storage, params, listings)
+            yield _ndjson(event)
+        except Exception as exc:  # surface mid-stream failures (not cancellation)
+            yield _ndjson({"type": "error", "message": str(exc)})
+
+    return StreamingResponse(gen(), media_type="application/x-ndjson")
+
+
+@app.post("/api/search/stream")
+async def api_search_stream(req: SearchRequest) -> StreamingResponse:
+    """Job search streamed as NDJSON: ``log`` events while scraping, then ``result``.
+
+    The UI reads this incrementally to show progress; aborting the request
+    (client disconnect) cancels the scrape, which is how the user stops it.
+    """
+
+    async def finalize(
+        storage: Storage, params: SearchParams, listings: list[JobListing]
+    ) -> dict[str, object]:
+        counts = await storage.save_search_results(
+            listings, keyword=req.keywords, location=params.location
+        )
+        return {
+            "type": "result",
+            "count": len(listings),
+            "new_count": counts["new_listings"],
+            "new_companies": counts["new_companies"],
+            "position_id": counts["position_id"],
+            "jobs": [_job_to_dict(job) for job in listings],
+        }
+
+    return _stream_to_result(req, f"Searching LinkedIn for “{req.keywords}”…", finalize)
+
+
+@app.post("/api/companies/search/stream")
+async def api_companies_search_stream(req: SearchRequest) -> StreamingResponse:
+    """Companies search streamed as NDJSON (see :func:`api_search_stream`)."""
+
+    async def finalize(
+        storage: Storage, params: SearchParams, listings: list[JobListing]
+    ) -> dict[str, object]:
+        counts = await storage.save_search_results(
+            listings, keyword=req.keywords, location=params.location
+        )
+        position_id = counts["position_id"]
+        companies = await storage.get_companies_for_position(position_id)
+        return {
+            "type": "result",
+            "count": len(companies),
+            "position_id": position_id,
+            "new_companies": counts["new_companies"],
+            "companies": [_company_to_dict(c) for c in companies],
+        }
+
+    return _stream_to_result(req, f"Finding companies for “{req.keywords}”…", finalize)
+
+
+@app.post("/api/search/batch/stream")
+async def api_search_batch_stream(req: BatchSearchRequest) -> StreamingResponse:
+    """Batch search streamed as NDJSON: progress per keyword + page, then ``result``.
+
+    Each keyword is saved as it completes, so stopping mid-batch keeps the terms
+    already finished.
+    """
+    terms = [k.strip() for k in req.keywords if k.strip()]
+
+    def enough(listings: list[JobListing]) -> bool:
+        return len({listing.company.lower() for listing in listings}) >= req.target_companies
+
+    async def gen() -> AsyncIterator[bytes]:
+        try:
+            results: list[dict[str, object]] = []
+            async with Storage() as storage:
+                for index, term in enumerate(terms, start=1):
+                    yield _ndjson(
+                        {"type": "log", "message": f"[{index}/{len(terms)}] Searching “{term}”…"}
+                    )
+                    params = SearchParams(
+                        keywords=term,
+                        location=req.location or None,
+                        geo_id=req.geo_id or None,
+                        workplace_type=req.workplace_type,
+                        posted_within_seconds=req.posted_within_seconds,
+                        language=req.language or None,
+                    )
+                    collected: list[JobListing] = []
+                    async for kind, payload in _stream_search_events(
+                        params, stop=enough, with_details=req.details
+                    ):
+                        if kind == "log":
+                            yield _ndjson({"type": "log", "message": f"   {payload}"})
+                        elif isinstance(payload, list):
+                            collected = payload
+                    counts = await storage.save_search_results(
+                        collected, keyword=term, location=params.location
+                    )
+                    companies = len({listing.company.lower() for listing in collected})
+                    results.append(
+                        {
+                            "keywords": term,
+                            "listings": len(collected),
+                            "companies": companies,
+                            "new_listings": counts["new_listings"],
+                            "new_companies": counts["new_companies"],
+                            "position_id": counts["position_id"],
+                        }
+                    )
+                    yield _ndjson(
+                        {
+                            "type": "log",
+                            "message": f"   ↳ saved: {companies} companies, "
+                            f"{counts['new_listings']} new listings.",
+                        }
+                    )
+            yield _ndjson({"type": "result", "count": len(results), "results": results})
+        except Exception as exc:  # surface mid-stream failures (not cancellation)
+            yield _ndjson({"type": "error", "message": str(exc)})
+
+    return StreamingResponse(gen(), media_type="application/x-ndjson")
 
 
 # --------------------------------------------------------------------------- #

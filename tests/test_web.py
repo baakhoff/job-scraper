@@ -8,7 +8,8 @@ plus the graceful "people search disabled" path.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterator
+import json
+from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 
 import pytest
@@ -120,6 +121,87 @@ def test_batch_search_runs_each_keyword(
     # The batch results are persisted as new searches (positions).
     positions = client.get("/api/positions").json()["positions"]
     assert any(p["keyword"] == "go dev" for p in positions)
+
+
+def test_search_stream_emits_logs_then_result(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def fake_events(
+        params: object, *, max_results: int | None = None,
+        stop: object = None, with_details: bool = False,
+    ) -> AsyncIterator[tuple[str, object]]:
+        yield ("log", "Page 1: 1 listings, 1 companies so far…")
+        yield (
+            "listings",
+            [
+                JobListing(
+                    job_id="s1", title="Go Dev", company="Go Co",
+                    company_url="https://www.linkedin.com/company/x",
+                )
+            ],
+        )
+
+    monkeypatch.setattr("web._stream_search_events", fake_events)
+    resp = client.post("/api/search/stream", json={"keywords": "go dev", "max_results": 25})
+    assert resp.status_code == 200
+    events = [json.loads(line) for line in resp.text.splitlines() if line.strip()]
+    assert "log" in {e["type"] for e in events}            # progress streamed
+    result = events[-1]
+    assert result["type"] == "result"
+    assert result["count"] == 1 and result["jobs"][0]["company"] == "Go Co"
+    # Persisted as a searchable position.
+    positions = client.get("/api/positions").json()["positions"]
+    assert any(p["keyword"] == "go dev" for p in positions)
+
+
+def test_search_stream_surfaces_midstream_error(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def boom(
+        params: object, *, max_results: int | None = None,
+        stop: object = None, with_details: bool = False,
+    ) -> AsyncIterator[tuple[str, object]]:
+        yield ("log", "Page 1…")
+        raise RuntimeError("scrape blew up")
+
+    monkeypatch.setattr("web._stream_search_events", boom)
+    resp = client.post("/api/search/stream", json={"keywords": "go dev"})
+    assert resp.status_code == 200
+    events = [json.loads(line) for line in resp.text.splitlines() if line.strip()]
+    # A failure mid-stream is reported as an explicit error event, not a silent cut-off.
+    assert events[-1]["type"] == "error"
+    assert "blew up" in events[-1]["message"]
+
+
+def test_batch_stream_emits_per_keyword_result(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def fake_events(
+        params: object, *, max_results: int | None = None,
+        stop: object = None, with_details: bool = False,
+    ) -> AsyncIterator[tuple[str, object]]:
+        kw = params.keywords  # type: ignore[attr-defined]
+        yield ("log", "Page 1…")
+        yield (
+            "listings",
+            [
+                JobListing(
+                    job_id=f"b-{kw}", title=kw.title(), company=f"{kw.title()} Co",
+                    company_url="https://www.linkedin.com/company/x",
+                )
+            ],
+        )
+
+    monkeypatch.setattr("web._stream_search_events", fake_events)
+    resp = client.post(
+        "/api/search/batch/stream",
+        json={"keywords": ["go dev", "rust dev"], "target_companies": 5},
+    )
+    assert resp.status_code == 200
+    events = [json.loads(line) for line in resp.text.splitlines() if line.strip()]
+    result = events[-1]
+    assert result["type"] == "result" and result["count"] == 2
+    assert {r["keywords"] for r in result["results"]} == {"go dev", "rust dev"}
 
 
 def test_export_listings_csv(client: TestClient) -> None:

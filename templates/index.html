@@ -92,6 +92,16 @@
     .explore-bar input { width: 160px; }
     .explore-bar .sep { width: 1px; height: 22px; background: var(--line); margin: 0 2px; }
 
+    /* live search log (progress + stop) */
+    .searchlog { background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+      box-shadow: var(--shadow); overflow: hidden; }
+    .searchlog-head { display: flex; align-items: center; gap: 10px; padding: 12px 16px;
+      border-bottom: 1px solid var(--line); font-size: 14px; color: var(--ink); }
+    .searchlog-head .grow { flex: 1; color: var(--muted); }
+    .searchlog-body { margin: 0; padding: 12px 16px; max-height: 320px; overflow-y: auto;
+      font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12.5px;
+      color: var(--ink); white-space: pre-wrap; line-height: 1.7; }
+
     /* drawer */
     .drawer-bg { position: fixed; inset: 0; background: rgba(16,38,60,.35); display: none; z-index: 20; }
     .drawer-bg.open { display: block; }
@@ -306,7 +316,7 @@
       <div class="section">
         <h3>Limitations</h3>
         <ul>
-          <li><strong>Rate limiting</strong> — LinkedIn blocks rapid requests. Searches include jittered delays (2–5 s per page) and automatic 429 backoff. A large search can take a minute.</li>
+          <li><strong>Rate limiting</strong> — LinkedIn blocks rapid requests. Searches include jittered delays (2–5 s per page) and automatic 429 backoff. A large search can take a minute — it streams live progress as it pages, and you can press <em>⏹ Stop</em> any time to cancel.</li>
           <li><strong>People search (Find leaders)</strong> — LinkedIn's public people search is login-gated. The button attempts a best-effort scrape but usually returns no results.</li>
           <li><strong>Company profiles</strong> — opening a company auto-fetches its public profile (industry, size, website, HQ) once, best-effort. Logged-out company pages are sparse and may be blocked, so some fields stay blank.</li>
           <li><strong>Fragile selectors</strong> — LinkedIn changes its HTML markup without notice. If results are empty or fields are missing, selectors in <code>src/parser.py</code> may need updating.</li>
@@ -341,6 +351,79 @@
       companies: "Find the companies hiring for a role. Runs a search, then groups the listings by company. Use <b>Show saved</b> to browse without scraping.",
     };
 
+    // ---------- streaming search (live progress log + stop) ----------
+    function renderSearchLog(logs, controller) {
+      view.innerHTML = `
+        <div class="searchlog">
+          <div class="searchlog-head">
+            <span class="spinner"></span>
+            <span class="grow">Working — live progress below. You can stop anytime.</span>
+            <button class="btn-ghost btn-sm" id="stop-btn">⏹ Stop</button>
+          </div>
+          <pre class="searchlog-body" id="searchlog-body">${logs.map(esc).join("\n")}</pre>
+        </div>`;
+      const stopBtn = $("stop-btn");
+      if (controller) {
+        stopBtn.addEventListener("click", () => {
+          controller.abort();
+          stopBtn.disabled = true;
+          stopBtn.textContent = "Stopping…";
+        });
+      } else {
+        stopBtn.disabled = true;
+      }
+      const b = $("searchlog-body");
+      b.scrollTop = b.scrollHeight;
+    }
+
+    // Append one line to the live log if it's on screen; returns false if not.
+    function appendLogLine(line) {
+      const b = $("searchlog-body");
+      if (!b) return false;
+      b.textContent += (b.textContent ? "\n" : "") + line;
+      b.scrollTop = b.scrollHeight;
+      return true;
+    }
+
+    // POST + read an NDJSON event stream: {type:"log"|"result"|"error", ...}.
+    // onLog gets each progress line; returns the final "result" event (or null).
+    async function streamRequest(url, body, onLog, signal) {
+      const res = await fetch(url, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body), signal,
+      });
+      if (!res.ok) {
+        let d = res.statusText;
+        try { const j = await res.json(); d = JSON.stringify(j.detail ?? j); } catch (_) {}
+        throw new Error(d);
+      }
+      if (!res.body) throw new Error("The server returned an empty response stream.");
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        let nl;
+        while ((nl = buf.indexOf("\n")) >= 0) {
+          const line = buf.slice(0, nl).trim();
+          buf = buf.slice(nl + 1);
+          if (!line) continue;
+          let evt;
+          try { evt = JSON.parse(line); } catch (_) { continue; }
+          if (evt.type === "log") onLog(evt.message);
+          else if (evt.type === "error") throw new Error(evt.message);
+          else if (evt.type === "result") {
+            // Result is terminal — return at once so a late abort can't discard it.
+            try { await reader.cancel(); } catch (_) {}
+            return evt;
+          }
+        }
+      }
+      return null;
+    }
+
     // ---------- tabs ----------
     document.querySelectorAll(".tab").forEach((t) =>
       t.addEventListener("click", () => switchTab(t.dataset.tab)));
@@ -355,7 +438,11 @@
       const m = memory[name];
       if (!m) return false;
       setStatus(m.loading, m.status);
-      if (!m.loading && m.data) {
+      if (m.loading) {
+        if (m.logs) renderSearchLog(m.logs, m.controller);   // live progress + Stop
+        else view.innerHTML = "";
+        exportBar.innerHTML = "";
+      } else if (m.data) {
         (name === "companies" ? renderCompanies : renderJobs)(m.data);
         exportBar.innerHTML = "";
         if (m.entity) exportButtons(m.entity);
@@ -364,6 +451,14 @@
         exportBar.innerHTML = "";
       }
       return true;
+    }
+
+    // Record a progress line for a tab's running search and show it if visible.
+    function pushLog(name, line) {
+      const m = memory[name];
+      if (!m || !m.logs) return;
+      m.logs.push(line);
+      if (activeTab === name && !appendLogLine(line)) renderMemory(name);
     }
 
     function switchTab(name) {
@@ -409,37 +504,48 @@
       const body = searchBody();
       if (!body.keywords) return;
       const tab = activeTab;                       // the tab this search belongs to
+      if (memory[tab] && memory[tab].loading) return;   // a search is already running on this tab
       const companies = tab === "companies";
-      const busyMsg = companies ? "Searching companies… this can take a moment." : "Searching LinkedIn… this can take a moment.";
-      memory[tab] = { loading: true, status: busyMsg, data: null, entity: null };
+      const controller = new AbortController();
+      const busyMsg = companies ? "Searching companies…" : "Searching LinkedIn…";
+      memory[tab] = { loading: true, status: busyMsg, data: null, entity: null, logs: [], controller };
       if (activeTab === tab) renderMemory(tab);
+      const url = companies ? "/api/companies/search/stream" : "/api/search/stream";
       try {
-        const data = await api(companies ? "/api/companies/search" : "/api/search", {
-          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
-        });
+        const result = await streamRequest(url, body, (line) => pushLog(tab, line), controller.signal);
+        if (!result) throw new Error("No result received from the server.");
         const status = companies
-          ? `<span class="pill">${data.count} companies</span> ${data.new_companies} new · saved.`
-          : `<span class="pill">${data.count} jobs</span> ${data.new_count} new · ${data.new_companies} new companies · saved.`;
+          ? `<span class="pill">${result.count} companies</span> ${result.new_companies} new · saved.`
+          : `<span class="pill">${result.count} jobs</span> ${result.new_count} new · ${result.new_companies} new companies · saved.`;
         memory[tab] = {
           loading: false, status,
-          data: companies ? data.companies : data.jobs,
+          data: companies ? result.companies : result.jobs,
           entity: companies ? "companies" : "listings",
         };
       } catch (err) {
-        memory[tab] = { loading: false, status: `❌ ${esc(err.message)}`, data: null, entity: null };
+        const stopped = err.name === "AbortError";
+        memory[tab] = {
+          loading: false,
+          status: stopped ? "⏹ Stopped — partial results were not saved." : `❌ ${esc(err.message)}`,
+          data: null, entity: null,
+        };
       }
       if (activeTab === tab) renderMemory(tab);    // only paint if still on that tab
     }
 
     // ---------- batch ----------
-    let batchHtml = "";   // remembers the last batch results across tab switches
+    let batchHtml = "";          // last batch results, remembered across tab switches
+    let batchController = null;  // AbortController while a batch is running (Stop)
+    let batchLogs = [];          // live progress lines for the running batch
 
     function renderBatchView() {
+      if (batchController) { renderSearchLog(batchLogs, batchController); return; }  // running
       view.innerHTML = batchHtml ||
         `<div class="empty">Enter keywords (one per line) and run a batch search.</div>`;
     }
 
     async function runBatch() {
+      if (batchController) return;   // a batch is already running
       const keywords = $("batch-keywords").value.split("\n").map((s) => s.trim()).filter(Boolean);
       if (!keywords.length) { setStatus(false, "Enter at least one keyword (one per line)."); return; }
       const body = {
@@ -450,14 +556,18 @@
         target_companies: Number($("batch-target").value) || 10,
         details: $("batch-details").checked,
       };
-      const btn = $("batch-btn"); btn.disabled = true;
-      setStatus(true, `Running ${keywords.length} search${keywords.length > 1 ? "es" : ""}… this can take a while.`);
-      view.innerHTML = "";
+      $("batch-btn").disabled = true;
+      batchController = new AbortController();
+      batchLogs = [];
+      setStatus(true, `Running ${keywords.length} search${keywords.length > 1 ? "es" : ""}…`);
+      if (activeTab === "batch") renderSearchLog(batchLogs, batchController);
       try {
-        const data = await api("/api/search/batch", {
-          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
-        });
-        const rows = data.results.map((r) => `
+        const result = await streamRequest("/api/search/batch/stream", body, (line) => {
+          batchLogs.push(line);
+          if (activeTab === "batch" && !appendLogLine(line)) renderSearchLog(batchLogs, batchController);
+        }, batchController.signal);
+        if (!result) throw new Error("No result received from the server.");
+        const rows = result.results.map((r) => `
           <tr>
             <td><b>${esc(r.keywords)}</b></td>
             <td class="num-cell">${r.companies}</td>
@@ -466,13 +576,21 @@
             <td class="num-cell">${r.new_listings}</td>
           </tr>`).join("");
         batchHtml = `<table><thead><tr><th>Keyword</th><th>Companies</th><th>New co.</th><th>Listings</th><th>New</th></tr></thead><tbody>${rows}</tbody></table>`;
+        batchController = null;
         if (activeTab === "batch") {
-          setStatus(false, `<span class="pill">${data.count} searches done</span> · saved. Browse them in Explore.`);
+          setStatus(false, `<span class="pill">${result.count} searches done</span> · saved. Browse them in Explore.`);
           renderBatchView();
         }
       } catch (err) {
-        if (activeTab === "batch") setStatus(false, `❌ ${esc(err.message)}`);
-      } finally { btn.disabled = false; }
+        const stopped = err.name === "AbortError";
+        batchController = null;
+        if (activeTab === "batch") {
+          setStatus(false, stopped ? "⏹ Stopped." : `❌ ${esc(err.message)}`);
+          view.innerHTML = `<div class="empty">${stopped
+            ? "⏹ Stopped. Keywords completed before stopping were saved — see Explore."
+            : "❌ " + esc(err.message)}</div>`;
+        }
+      } finally { $("batch-btn").disabled = false; }
     }
 
     // ---------- jobs ----------
