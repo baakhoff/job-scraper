@@ -622,8 +622,12 @@
         }, refetchController.signal);
         refetchController = null;
         if (!result) throw new Error("No result received from the server.");
+        const skipped = result.count - result.enriched;
+        const skipNote = skipped > 0
+          ? ` ${skipped} had no detail page (expired or blocked) and were skipped.`
+          : "";
         setStatus(false, `<span class="pill">${result.enriched} enriched</span> of ${result.count} listing(s) · details + language updated.`);
-        view.innerHTML = `<div class="empty">Done — ${result.enriched} of ${result.count} listing(s) enriched. Open Explore to filter by language.</div>`;
+        view.innerHTML = `<div class="empty">Done — enriched ${result.enriched} of ${result.count} listing(s).${skipNote} Explore now reflects the new details (By industry, language filter).</div>`;
       } catch (err) {
         refetchController = null;
         const stopped = err.name === "AbortError";
