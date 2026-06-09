@@ -201,19 +201,18 @@ async def _enrich_with_details(
         if not html.strip():
             enriched.append(listing)
             continue
-        detail = parse_detail_html(html)
-        updates = {k: v for k, v in detail.items() if v is not None}
-        if not updates:
-            enriched.append(listing)
-            continue
         try:
-            # Re-validate through the model rather than model_copy so detail
-            # strings (e.g. company_url) get the same coercion as search fields.
-            merged = {**listing.model_dump(), **updates}
-            enriched.append(JobListing(**merged))
+            # Parse + re-validate through the model rather than model_copy so
+            # detail strings (e.g. company_url) get the same coercion as search
+            # fields. Parsing is inside the try so a single malformed detail page
+            # can't abort the whole search — it just keeps the base listing.
+            detail = parse_detail_html(html)
+            updates = {k: v for k, v in detail.items() if v is not None}
+            if updates:
+                listing = JobListing(**{**listing.model_dump(), **updates})
         except Exception as exc:  # bad detail markup shouldn't drop the base listing
             console.print(f"[yellow]detail merge skipped for {listing.job_id}:[/yellow] {exc}")
-            enriched.append(listing)
+        enriched.append(listing)
     return enriched
 
 

@@ -39,7 +39,7 @@ DETAIL_CRITERIA_ITEM_SELECTOR = "li.description__job-criteria-item"
 DETAIL_CRITERIA_HEADER_SELECTOR = "h3.description__job-criteria-subheader"
 DETAIL_CRITERIA_VALUE_SELECTOR = "span.description__job-criteria-text"
 DETAIL_COMPANY_LINK_SELECTOR = "a.topcard__org-name-link"
-DETAIL_APPLICANTS_RE = re.compile(r"([\d,]+)\s+applicants?", re.IGNORECASE)
+DETAIL_APPLICANTS_RE = re.compile(r"(\d[\d,]*)\s+applicants?", re.IGNORECASE)
 
 # Company "about" page selectors (linkedin.com/company/{slug}). Logged-out
 # company pages are sparse and often fall back to OpenGraph <meta> tags, so we
@@ -140,9 +140,10 @@ def parse_detail_html(html: str) -> dict[str, object]:
             criteria[header.get_text(strip=True).lower()] = value.get_text(strip=True)
 
     applicants_match = DETAIL_APPLICANTS_RE.search(html)
-    applicant_count = (
-        int(applicants_match.group(1).replace(",", "")) if applicants_match else None
-    )
+    applicant_count = None
+    if applicants_match:
+        digits = applicants_match.group(1).replace(",", "")
+        applicant_count = int(digits) if digits else None  # guard against a comma-only match
 
     return {
         "description": description_el.get_text(" ", strip=True) if description_el else None,

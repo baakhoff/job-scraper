@@ -107,6 +107,14 @@ def test_parse_detail_html_tolerates_missing_fields() -> None:
     assert detail["company_url"] is None
 
 
+def test_parse_detail_html_applicant_count_parsing() -> None:
+    # Thousands separators parse to an int.
+    assert parse_detail_html("<p>1,234 applicants</p>")["applicant_count"] == 1234
+    # A comma-only / non-numeric match must NOT raise int('') — regression guard.
+    assert parse_detail_html("<p>, applicants</p>")["applicant_count"] is None
+    assert parse_detail_html("<p>applicants</p>")["applicant_count"] is None
+
+
 def test_job_id_falls_back_to_link_when_no_urn() -> None:
     html = """
     <li><div class="base-card">
