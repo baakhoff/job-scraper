@@ -55,6 +55,9 @@ class SearchRequest(BaseModel):
     posted_within_seconds: int | None = Field(
         None, description="Only jobs posted within N seconds."
     )
+    language: str | None = Field(
+        None, description="ISO locale hint (e.g. 'de') sent to LinkedIn as Accept-Language."
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -76,6 +79,7 @@ def _job_to_dict(job: JobListing) -> dict[str, object]:
         "industries": job.industries,
         "applicant_count": job.applicant_count,
         "salary": job.salary,
+        "language": job.language,
         "description_snippet": job.description_snippet,
         "description": job.description,
     }
@@ -151,6 +155,7 @@ async def api_search(req: SearchRequest) -> dict[str, object]:
         geo_id=req.geo_id or None,
         workplace_type=req.workplace_type,
         posted_within_seconds=req.posted_within_seconds,
+        language=req.language or None,
     )
     listings = await _run_search(params, req.max_results, with_details=req.details)
     async with Storage() as storage:
@@ -175,6 +180,7 @@ async def api_companies_search(req: SearchRequest) -> dict[str, object]:
         geo_id=req.geo_id or None,
         workplace_type=req.workplace_type,
         posted_within_seconds=req.posted_within_seconds,
+        language=req.language or None,
     )
     listings = await _run_search(params, req.max_results, with_details=req.details)
     async with Storage() as storage:
@@ -195,34 +201,51 @@ async def api_companies_search(req: SearchRequest) -> dict[str, object]:
 # Explore (read stored data)                                                  #
 # --------------------------------------------------------------------------- #
 @app.get("/api/positions")
-async def api_positions() -> dict[str, object]:
-    """All searched positions, with company/listing counts."""
+async def api_positions(
+    workplace_type: WorkplaceType | None = None, language: str | None = None
+) -> dict[str, object]:
+    """All searched positions, with company/listing counts (optional filters)."""
     async with Storage() as storage:
-        positions = await storage.get_positions()
+        positions = await storage.get_positions(workplace_type=workplace_type, language=language)
     return {"count": len(positions), "positions": [_position_to_dict(p) for p in positions]}
 
 
 @app.get("/api/positions/{position_id}/companies")
-async def api_position_companies(position_id: int) -> dict[str, object]:
-    """Companies hiring for a position."""
+async def api_position_companies(
+    position_id: int, workplace_type: WorkplaceType | None = None, language: str | None = None
+) -> dict[str, object]:
+    """Companies hiring for a position (optional workplace/language filters)."""
     async with Storage() as storage:
-        companies = await storage.get_companies_for_position(position_id)
+        companies = await storage.get_companies_for_position(
+            position_id, workplace_type=workplace_type, language=language
+        )
     return {"count": len(companies), "companies": [_company_to_dict(c) for c in companies]}
 
 
 @app.get("/api/positions/{position_id}/listings")
-async def api_position_listings(position_id: int) -> dict[str, object]:
-    """Job listings saved under a position."""
+async def api_position_listings(
+    position_id: int, workplace_type: WorkplaceType | None = None, language: str | None = None
+) -> dict[str, object]:
+    """Job listings saved under a position (optional workplace/language filters)."""
     async with Storage() as storage:
-        listings = await storage.get_listings_for_position(position_id)
+        listings = await storage.get_listings_for_position(
+            position_id, workplace_type=workplace_type, language=language
+        )
     return {"count": len(listings), "listings": [_job_to_dict(j) for j in listings]}
 
 
 @app.get("/api/companies")
-async def api_companies(keyword: str | None = None, limit: int = 200) -> dict[str, object]:
-    """All stored companies (optional name filter)."""
+async def api_companies(
+    keyword: str | None = None,
+    limit: int = 200,
+    workplace_type: WorkplaceType | None = None,
+    language: str | None = None,
+) -> dict[str, object]:
+    """All stored companies (optional name filter + workplace/language filters)."""
     async with Storage() as storage:
-        companies = await storage.get_companies(keyword=keyword, limit=limit)
+        companies = await storage.get_companies(
+            keyword=keyword, limit=limit, workplace_type=workplace_type, language=language
+        )
     return {"count": len(companies), "companies": [_company_to_dict(c) for c in companies]}
 
 
@@ -286,6 +309,7 @@ async def api_enrich_company(company_id: int) -> dict[str, object]:
             company_size=data.get("company_size"),
             website=data.get("website"),
             description=data.get("description"),
+            location=data.get("headquarters"),
         )
         return {"company": _company_to_dict(updated or company), "note": None}
 
@@ -333,7 +357,7 @@ async def api_company_people(
 # --------------------------------------------------------------------------- #
 _EXPORT_FIELDS: dict[str, list[str]] = {
     "listings": [
-        "job_id", "title", "company", "location", "workplace_type", "url",
+        "job_id", "title", "company", "location", "workplace_type", "language", "url",
         "posted_at", "seniority", "employment_type", "applicant_count",
         "company_url", "description_snippet",
     ],

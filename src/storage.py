@@ -27,6 +27,7 @@ from datetime import UTC, datetime
 
 import structlog
 from sqlalchemy import (
+    ColumnElement,
     Connection,
     DateTime,
     ForeignKey,
@@ -99,6 +100,8 @@ class JobRecord(Base):
     job_function: Mapped[str | None] = mapped_column(String, nullable=True)
     industries: Mapped[str | None] = mapped_column(String, nullable=True)
     applicant_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Heuristic detected language (ISO code); indexed for the Explore filter.
+    language: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
     first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     # Relational links, added in the Positions/Companies model. Nullable so
     # legacy rows (and back-compat ``save_jobs``) remain valid; new searches
@@ -129,6 +132,7 @@ class JobRecord(Base):
             job_function=self.job_function,
             industries=self.industries,
             applicant_count=self.applicant_count,
+            language=self.language,
         )
 
 
@@ -512,8 +516,16 @@ class Storage:
         await session.flush()  # assign primary key for linking
         return record, True
 
-    async def get_positions(self) -> list[Position]:
-        """All searched positions with company + listing counts, newest-first."""
+    async def get_positions(
+        self, *, workplace_type: WorkplaceType | None = None, language: str | None = None
+    ) -> list[Position]:
+        """All searched positions with company + listing counts, newest-first.
+
+        When ``workplace_type`` / ``language`` are given, counts reflect only the
+        matching listings and positions with no matching listing are dropped.
+        """
+        extra = _listing_filter_conds(workplace_type, language)
+        filtered = bool(extra)
         async with self._session() as session:
             records = (
                 await session.scalars(
@@ -522,18 +534,15 @@ class Storage:
             ).all()
             positions: list[Position] = []
             for rec in records:
+                conds = [JobRecord.position_id == rec.id, *extra]
                 listing_count = (
-                    await session.scalar(
-                        select(func.count())
-                        .select_from(JobRecord)
-                        .where(JobRecord.position_id == rec.id)
-                    )
+                    await session.scalar(select(func.count()).select_from(JobRecord).where(*conds))
                 ) or 0
+                if filtered and listing_count == 0:
+                    continue
                 company_count = (
                     await session.scalar(
-                        select(func.count(func.distinct(JobRecord.company_id))).where(
-                            JobRecord.position_id == rec.id
-                        )
+                        select(func.count(func.distinct(JobRecord.company_id))).where(*conds)
                     )
                 ) or 0
                 positions.append(
@@ -547,12 +556,26 @@ class Storage:
                 )
             return positions
 
-    async def get_companies_for_position(self, position_id: int) -> list[Company]:
-        """Companies hiring for a position (derived from listings), by listing count."""
+    async def get_companies_for_position(
+        self,
+        position_id: int,
+        *,
+        workplace_type: WorkplaceType | None = None,
+        language: str | None = None,
+    ) -> list[Company]:
+        """Companies hiring for a position (derived from listings), by listing count.
+
+        Honors the Explore ``workplace_type`` / ``language`` filters so the
+        position drill-down's companies view agrees with its listings view.
+        """
         async with self._session() as session:
             stmt = (
                 select(JobRecord.company_id, func.count().label("cnt"))
-                .where(JobRecord.position_id == position_id, JobRecord.company_id.is_not(None))
+                .where(
+                    JobRecord.position_id == position_id,
+                    JobRecord.company_id.is_not(None),
+                    *_listing_filter_conds(workplace_type, language),
+                )
                 .group_by(JobRecord.company_id)
             )
             pairs = (await session.execute(stmt)).all()
@@ -603,16 +626,29 @@ class Storage:
             return positions
 
     async def get_companies(
-        self, *, keyword: str | None = None, limit: int | None = None
+        self,
+        *,
+        keyword: str | None = None,
+        limit: int | None = None,
+        workplace_type: WorkplaceType | None = None,
+        language: str | None = None,
     ) -> list[Company]:
-        """All stored companies (optional name filter), with listing counts."""
+        """All stored companies (optional name filter), with listing counts.
+
+        ``workplace_type`` / ``language`` filter by the company's listings: only
+        companies with a matching listing are returned, and ``listing_count``
+        reflects the matching subset. When filtering, ``limit`` is applied after
+        the match test so the result isn't starved by a pre-filter SQL ``LIMIT``.
+        """
+        extra = _listing_filter_conds(workplace_type, language)
+        filtered = bool(extra)
         async with self._session() as session:
             counts = {
                 cid: cnt
                 for cid, cnt in (
                     await session.execute(
                         select(JobRecord.company_id, func.count())
-                        .where(JobRecord.company_id.is_not(None))
+                        .where(JobRecord.company_id.is_not(None), *extra)
                         .group_by(JobRecord.company_id)
                     )
                 ).all()
@@ -620,10 +656,22 @@ class Storage:
             stmt = select(CompanyRecord).order_by(CompanyRecord.name)
             if keyword:
                 stmt = stmt.where(CompanyRecord.name.icontains(keyword))
-            if limit is not None:
+            if filtered:
+                # ``counts`` already holds exactly the matching company ids, so
+                # fetch only those rows instead of scanning the whole table.
+                stmt = stmt.where(CompanyRecord.id.in_(list(counts.keys())))
+            elif limit is not None:
                 stmt = stmt.limit(limit)
             records = (await session.scalars(stmt)).all()
-            return [rec.to_company(listing_count=counts.get(rec.id, 0)) for rec in records]
+            companies: list[Company] = []
+            for rec in records:
+                cnt = counts.get(rec.id, 0)
+                if filtered and cnt == 0:
+                    continue
+                companies.append(rec.to_company(listing_count=cnt))
+                if filtered and limit is not None and len(companies) >= limit:
+                    break
+            return companies
 
     async def get_company(self, company_id: int) -> Company | None:
         """A single company with its listing count, or ``None``."""
@@ -671,11 +719,24 @@ class Storage:
             ).all()
             return [rec.to_listing() for rec in records]
 
-    async def get_listings_for_position(self, position_id: int) -> list[JobListing]:
-        """Return all listings saved under a position, newest-first."""
+    async def get_listings_for_position(
+        self,
+        position_id: int,
+        *,
+        workplace_type: WorkplaceType | None = None,
+        language: str | None = None,
+    ) -> list[JobListing]:
+        """Return all listings saved under a position, newest-first.
+
+        Honors the same ``workplace_type`` / ``language`` filters as the Explore
+        positions table so a drilled-in listing view matches the active filter.
+        """
         stmt = (
             select(JobRecord)
-            .where(JobRecord.position_id == position_id)
+            .where(
+                JobRecord.position_id == position_id,
+                *_listing_filter_conds(workplace_type, language),
+            )
             .order_by(JobRecord.posted_at.desc().nullslast())
         )
         async with self._session() as session:
@@ -771,7 +832,11 @@ def _add_missing_pg_columns(conn: Connection) -> None:
     full columns — including the FK constraints — from ``create_all`` directly.
     """
     table_name = JobRecord.__tablename__
-    for column in (JobRecord.__table__.c.position_id, JobRecord.__table__.c.company_id):
+    for column in (
+        JobRecord.__table__.c.position_id,
+        JobRecord.__table__.c.company_id,
+        JobRecord.__table__.c.language,
+    ):
         col_type = column.type.compile(conn.dialect)
         conn.execute(
             text(
@@ -800,6 +865,22 @@ def _add_missing_sqlite_columns(conn: Connection) -> None:
         log.info("schema_column_added", column=column.name)
 
 
+def _listing_filter_conds(
+    workplace_type: WorkplaceType | None, language: str | None
+) -> list[ColumnElement[bool]]:
+    """Build listing-level WHERE conditions for the Explore filters.
+
+    Shared by the position/company/listing queries so the workplace-type and
+    language filters mean the same thing everywhere. Empty when no filter is set.
+    """
+    conds: list[ColumnElement[bool]] = []
+    if workplace_type is not None:
+        conds.append(JobRecord.workplace_type == workplace_type.value)
+    if language is not None:
+        conds.append(JobRecord.language == language)
+    return conds
+
+
 def _to_record(listing: JobListing, *, first_seen_at: datetime) -> JobRecord:
     """Map a domain listing onto a new ORM row."""
     return JobRecord(
@@ -819,6 +900,7 @@ def _to_record(listing: JobListing, *, first_seen_at: datetime) -> JobRecord:
         job_function=listing.job_function,
         industries=listing.industries,
         applicant_count=listing.applicant_count,
+        language=listing.language,
         first_seen_at=first_seen_at,
     )
 
@@ -848,6 +930,7 @@ def _update_record(record: JobRecord, listing: JobListing) -> None:
         "job_function",
         "industries",
         "applicant_count",
+        "language",
     ):
         value = getattr(listing, field)
         if value is not None:

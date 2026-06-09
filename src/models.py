@@ -13,6 +13,8 @@ from enum import StrEnum
 
 from pydantic import BaseModel, Field, HttpUrl, field_validator
 
+from .language import accept_language_header, detect_language
+
 # LinkedIn's ``f_WT`` workplace-type filter codes.
 _WORKPLACE_FILTER_CODES: dict[str, str] = {
     "on_site": "1",
@@ -45,7 +47,14 @@ class SearchParams(BaseModel):
     posted_within_seconds: int | None = Field(
         None, description="Only jobs posted within the last N seconds (LinkedIn 'f_TPR')."
     )
+    language: str | None = Field(
+        None, description="ISO code (e.g. 'de') hinting LinkedIn's locale via Accept-Language."
+    )
     start: int = Field(0, ge=0, description="Pagination offset; page size is 25.")
+
+    def accept_language_header(self) -> str | None:
+        """The ``Accept-Language`` header value for :attr:`language`, or ``None``."""
+        return accept_language_header(self.language)
 
     def to_query(self) -> dict[str, str]:
         """Serialize to the query-param dict expected by the guest endpoint.
@@ -92,6 +101,9 @@ class JobListing(BaseModel):
     applicant_count: int | None = Field(
         None, description="Applicant count parsed from the detail page, when shown."
     )
+    language: str | None = Field(
+        None, description="Best-effort detected ISO language code (heuristic; may be None)."
+    )
 
     @field_validator("title", "company", mode="before")
     @classmethod
@@ -116,6 +128,9 @@ class JobListing(BaseModel):
         produces a fully-populated listing.
         """
         location = _clean_text(raw.get("location")) or None
+        title = _clean_text(raw.get("title"))
+        snippet = _clean_text(raw.get("description_snippet")) or None
+        description = _clean_text(raw.get("description")) or None
         return cls(
             job_id=str(raw.get("job_id") or "").strip(),
             title=raw.get("title"),
@@ -125,14 +140,17 @@ class JobListing(BaseModel):
             workplace_type=_infer_workplace_type(location),
             url=_clean_text(raw.get("url")) or None,
             posted_at=_parse_posted_at(raw.get("posted_at"), raw.get("posted_text")),
-            description=_clean_text(raw.get("description")) or None,
-            description_snippet=_clean_text(raw.get("description_snippet")) or None,
+            description=description,
+            description_snippet=snippet,
             salary=_clean_text(raw.get("salary")) or None,
             seniority=_clean_text(raw.get("seniority")) or None,
             employment_type=_clean_text(raw.get("employment_type")) or None,
             job_function=_clean_text(raw.get("job_function")) or None,
             industries=_clean_text(raw.get("industries")) or None,
             applicant_count=_coerce_int(raw.get("applicant_count")),
+            # Detect from the richest text available (full description when the
+            # detail page was fetched, else title + snippet). Heuristic → may be None.
+            language=detect_language(title, snippet, description),
         )
 
 

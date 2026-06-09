@@ -73,6 +73,7 @@ async def _run_search(
         max_pages=config.max_pages,
         max_results=max_results,
         max_retries=config.max_retries,
+        accept_language=params.accept_language_header(),
     ) as scraper:
         listings: list[JobListing] = []
         async for html in scraper.iter_pages(params):
@@ -180,6 +181,9 @@ def search(
     workplace_type: WorkplaceType = typer.Option(
         None, "--workplace-type", "-w", help="remote / hybrid / on_site."
     ),
+    language: str = typer.Option(
+        None, "--language", help="ISO locale hint (e.g. 'de') sent as Accept-Language."
+    ),
     max_results: int = typer.Option(
         config.max_results, "--max-results", "-n", help="Max listings to fetch."
     ),
@@ -193,7 +197,11 @@ def search(
 ) -> None:
     """Run a job search, persist the results, and print them as a table."""
     params = SearchParams(
-        keywords=keywords, location=location, geo_id=geo_id, workplace_type=workplace_type
+        keywords=keywords,
+        location=location,
+        geo_id=geo_id,
+        workplace_type=workplace_type,
+        language=language,
     )
     console.print(
         f"[bold]Searching[/bold] '{keywords}'"

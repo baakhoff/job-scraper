@@ -11,7 +11,9 @@ are easy to repair when the markup shifts.
 
 from __future__ import annotations
 
+import json
 import re
+from collections.abc import Iterator
 
 import structlog
 from bs4 import BeautifulSoup
@@ -154,21 +156,101 @@ def parse_detail_html(html: str) -> dict[str, object]:
     }
 
 
+def _iter_jsonld_orgs(data: object) -> Iterator[dict[str, object]]:
+    """Yield every Organization-typed node from a parsed JSON-LD document.
+
+    Handles the three shapes LinkedIn emits: a bare object, a list of objects,
+    or a ``{"@graph": [...]}`` wrapper. A node counts as an Organization if its
+    ``@type`` mentions "Organization".
+    """
+    if isinstance(data, list):
+        for item in data:
+            yield from _iter_jsonld_orgs(item)
+        return
+    if not isinstance(data, dict):
+        return
+    graph = data.get("@graph")
+    if isinstance(graph, list):
+        for item in graph:
+            yield from _iter_jsonld_orgs(item)
+    raw_type = data.get("@type")
+    types = raw_type if isinstance(raw_type, list) else [raw_type]
+    if any(isinstance(t, str) and "Organization" in t for t in types):
+        yield data
+
+
+def _company_jsonld(soup: BeautifulSoup) -> dict[str, str]:
+    """Extract company fields from any Organization JSON-LD block.
+
+    LinkedIn company pages embed a schema.org Organization as JSON-LD, which is
+    far more stable than the visible DOM. Returns a partial dict with keys among
+    ``name`` / ``description`` / ``website`` / ``headquarters``; a missing or
+    malformed block yields ``{}`` (callers fall back to OpenGraph + DOM).
+    """
+    out: dict[str, str] = {}
+    for script in soup.find_all("script", attrs={"type": "application/ld+json"}):
+        if not isinstance(script, Tag):
+            continue
+        raw = script.string or script.get_text()
+        if not raw or not raw.strip():
+            continue
+        try:
+            data = json.loads(raw)
+        except (ValueError, TypeError):
+            continue
+        for node in _iter_jsonld_orgs(data):
+            name = node.get("name")
+            if isinstance(name, str) and name.strip() and "name" not in out:
+                out["name"] = name.strip()
+            desc = node.get("description")
+            if isinstance(desc, str) and desc.strip() and "description" not in out:
+                out["description"] = desc.strip()
+            # Website: the first non-LinkedIn http(s) URL in ``sameAs`` (``url``
+            # is the LinkedIn page itself, so it is not a useful website signal).
+            same = node.get("sameAs")
+            candidates = same if isinstance(same, list) else [same]
+            for candidate in candidates:
+                if (
+                    isinstance(candidate, str)
+                    and candidate.startswith(("http://", "https://"))
+                    and "linkedin.com" not in candidate
+                ):
+                    out.setdefault("website", candidate)
+                    break
+            addr = node.get("address")
+            if "headquarters" not in out:
+                if isinstance(addr, dict):
+                    parts = [addr.get("addressLocality"), addr.get("addressRegion"),
+                             addr.get("addressCountry")]
+                    hq = ", ".join(p for p in parts if isinstance(p, str) and p)
+                    if hq:
+                        out["headquarters"] = hq
+                elif isinstance(addr, str) and addr.strip():
+                    out["headquarters"] = addr.strip()
+    return out
+
+
 def parse_company_html(html: str) -> dict[str, object]:
     """Parse a public company page into a best-effort enrichment dict.
 
-    Logged-out company pages are sparse and version-dependent, so this reads
-    OpenGraph ``<meta>`` tags first (the most stable signal) and supplements
-    with visible DOM where present. Returns ``{name, description, industry,
-    company_size, website, headquarters}`` with ``None`` for anything missing.
+    Logged-out company pages are sparse and version-dependent, so this reads the
+    embedded Organization **JSON-LD** first (the most stable signal), then
+    OpenGraph ``<meta>`` tags, then visible DOM. Returns ``{name, description,
+    industry, company_size, website, headquarters}`` with ``None`` for anything
+    missing.
 
     NOTE: like the job selectors, these are fragile and may need updating when
     LinkedIn ships markup changes; missing fields are expected, not errors.
     """
     soup = BeautifulSoup(html, "lxml")
+    ld = _company_jsonld(soup)
 
-    name = _meta(soup, "og:title") or _text_soup(soup, COMPANY_NAME_SELECTOR)
-    description = _meta(soup, "og:description") or _text_soup(soup, COMPANY_DESC_SELECTOR)
+    name = ld.get("name") or _meta(soup, "og:title") or _text_soup(soup, COMPANY_NAME_SELECTOR)
+    description = (
+        ld.get("description")
+        or _meta(soup, "og:description")
+        or _text_soup(soup, COMPANY_DESC_SELECTOR)
+    )
 
     # Pull label -> value pairs out of any about-page definition list.
     facts: dict[str, str] = {}
@@ -186,8 +268,8 @@ def parse_company_html(html: str) -> dict[str, object]:
         "description": description,
         "industry": facts.get("industry") or facts.get("industries"),
         "company_size": facts.get("company size") or facts.get("size"),
-        "website": facts.get("website") or _meta(soup, "og:url"),
-        "headquarters": facts.get("headquarters"),
+        "website": ld.get("website") or facts.get("website") or _meta(soup, "og:url"),
+        "headquarters": ld.get("headquarters") or facts.get("headquarters"),
     }
 
 

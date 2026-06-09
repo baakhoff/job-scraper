@@ -156,6 +156,41 @@ def test_parse_company_html_tolerates_missing_fields() -> None:
     assert data["industry"] is None
 
 
+COMPANY_JSONLD_SAMPLE = """
+<html><head>
+  <meta property="og:title" content="Wrong Name" />
+  <script type="application/ld+json">
+  {"@context":"https://schema.org","@type":"Organization",
+   "name":"Acme Inc","description":"We build delightful widgets.",
+   "url":"https://www.linkedin.com/company/acme",
+   "sameAs":["https://www.linkedin.com/company/acme","https://acme.example"],
+   "address":{"@type":"PostalAddress","addressLocality":"Berlin","addressCountry":"DE"}}
+  </script>
+</head><body></body></html>
+"""
+
+
+def test_parse_company_html_prefers_jsonld() -> None:
+    data = parse_company_html(COMPANY_JSONLD_SAMPLE)
+    # JSON-LD name/description win over the (deliberately wrong) og:title.
+    assert data["name"] == "Acme Inc"
+    assert data["description"] == "We build delightful widgets."
+    # website = first non-LinkedIn sameAs; HQ assembled from the postal address.
+    assert data["website"] == "https://acme.example"
+    assert data["headquarters"] == "Berlin, DE"
+
+
+def test_parse_company_html_ignores_malformed_jsonld() -> None:
+    # A broken JSON-LD block must not raise — fall back to OpenGraph cleanly.
+    html = (
+        '<html><head><meta property="og:title" content="Fallback Co" />'
+        '<script type="application/ld+json">{ not valid json }</script>'
+        "</head><body></body></html>"
+    )
+    data = parse_company_html(html)
+    assert data["name"] == "Fallback Co"
+
+
 PEOPLE_SAMPLE = """
 <ul>
   <li>

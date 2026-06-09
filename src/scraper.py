@@ -94,6 +94,7 @@ class LinkedInScraper:
         max_pages: int = 40,
         max_results: int | None = None,
         max_retries: int = 4,
+        accept_language: str | None = None,
     ) -> None:
         if not user_agents:
             raise ValueError("at least one user agent is required")
@@ -102,6 +103,8 @@ class LinkedInScraper:
         self.max_pages = max_pages
         self.max_results = max_results
         self.max_retries = max_retries
+        # Locale hint for the guest endpoint; defaults to English when unset.
+        self.accept_language = accept_language or "en-US,en;q=0.9"
         self._client = httpx.AsyncClient(timeout=timeout, follow_redirects=True)
 
     async def __aenter__(self) -> LinkedInScraper:
@@ -119,7 +122,7 @@ class LinkedInScraper:
         return {
             "User-Agent": random.choice(self.user_agents),
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.9",
+            "Accept-Language": self.accept_language,
             "X-Requested-With": "XMLHttpRequest",
             "Referer": "https://www.linkedin.com/jobs",
         }

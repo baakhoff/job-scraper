@@ -268,3 +268,41 @@ async def test_get_positions_for_company(storage: Storage) -> None:
     by_kw = {p.keyword: p for p in positions}
     assert by_kw["Python"].company_count == 2
     assert by_kw["Data Scientist"].company_count == 1
+
+
+async def test_language_persisted_round_trip(storage: Storage) -> None:
+    await storage.save_search_results([_job("1", language="de")], keyword="X")
+    jobs = await storage.get_jobs()
+    assert jobs[0].language == "de"
+
+
+async def test_explore_filters_by_workplace_and_language(storage: Storage) -> None:
+    await storage.save_search_results(
+        [
+            _job("1", company="Acme", company_url=_ACME,
+                 workplace_type=WorkplaceType.REMOTE, language="en"),
+            _job("2", company="Globex", company_url=_GLOBEX,
+                 workplace_type=WorkplaceType.ON_SITE, language="de"),
+        ],
+        keyword="Python",
+        location="Berlin",
+    )
+
+    # Positions: a filter narrows the counts and drops non-matching positions.
+    remote = await storage.get_positions(workplace_type=WorkplaceType.REMOTE)
+    assert len(remote) == 1 and remote[0].listing_count == 1 and remote[0].company_count == 1
+    german = await storage.get_positions(language="de")
+    assert len(german) == 1 and german[0].listing_count == 1
+    assert await storage.get_positions(language="fr") == []  # no match → dropped
+
+    # Companies: only those with a matching listing are returned.
+    assert [c.name for c in await storage.get_companies(workplace_type=WorkplaceType.REMOTE)] == [
+        "Acme"
+    ]
+    assert [c.name for c in await storage.get_companies(language="de")] == ["Globex"]
+
+    # Listings-for-position honors the same filters.
+    pos = (await storage.get_positions())[0]
+    assert pos.id is not None
+    listings = await storage.get_listings_for_position(pos.id, language="de")
+    assert [j.job_id for j in listings] == ["2"]

@@ -31,6 +31,7 @@
     .field { display: flex; flex-direction: column; gap: 6px; }
     .kw { grid-column: span 4; } .loc { grid-column: span 3; } .wt { grid-column: span 2; }
     .dp { grid-column: span 2; } .num { grid-column: span 2; } .det { grid-column: span 4; } .go { grid-column: span 8; }
+    .lang { grid-column: span 2; }
     label { font-size: 11px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .4px; }
     input[type=text], input[type=number], select { padding: 9px 11px; border: 1px solid var(--line);
       border-radius: 8px; font-size: 14px; background: #fff; color: var(--ink); width: 100%; }
@@ -82,6 +83,13 @@
     tr.clickable:hover td { background: #f7fafc; }
     .num-cell { font-variant-numeric: tabular-nums; }
     .empty { text-align: center; color: var(--muted); padding: 36px 0; }
+
+    /* explore filter bar */
+    .explore-bar { display: flex; gap: 8px; align-items: center; margin-bottom: 14px; flex-wrap: wrap; }
+    .explore-bar input, .explore-bar select { padding: 7px 10px; border: 1px solid var(--line);
+      border-radius: 8px; font-size: 13px; background: #fff; color: var(--ink); }
+    .explore-bar input { width: 160px; }
+    .explore-bar .sep { width: 1px; height: 22px; background: var(--line); margin: 0 2px; }
 
     /* drawer */
     .drawer-bg { position: fixed; inset: 0; background: rgba(16,38,60,.35); display: none; z-index: 20; }
@@ -147,6 +155,19 @@
             <option value="remote">Remote</option>
             <option value="hybrid">Hybrid</option>
             <option value="on_site">On-site</option>
+          </select>
+        </div>
+        <div class="field lang">
+          <label for="language">Language</label>
+          <select id="language">
+            <option value="">Any</option>
+            <option value="en">English</option>
+            <option value="de">German</option>
+            <option value="fr">French</option>
+            <option value="es">Spanish</option>
+            <option value="nl">Dutch</option>
+            <option value="it">Italian</option>
+            <option value="pt">Portuguese</option>
           </select>
         </div>
         <div class="field dp">
@@ -216,7 +237,7 @@
         <ul>
           <li><strong>Jobs</strong> — search LinkedIn and save listings. Each search appends new results; duplicates are skipped.</li>
           <li><strong>Companies</strong> — run a search and see which companies are hiring for that role, grouped by employer. Use <em>Show saved</em> to browse without a new scrape.</li>
-          <li><strong>Explore</strong> — browse your saved data without hitting LinkedIn. Toggle <em>By position</em> (click a position → companies hiring + its listings) or <em>By company</em> (click a company → the positions it's hiring for). Use <em>Search more</em> to fetch fresh results for any saved position.</li>
+          <li><strong>Explore</strong> — browse your saved data without hitting LinkedIn. Toggle <em>By position</em> (click a position → companies hiring + its listings) or <em>By company</em> (click a company → the positions it's hiring for). Filter the view by name/location (instant), or by workplace type and detected language (re-queries the database). Use <em>Search more</em> to fetch fresh results for any saved position.</li>
         </ul>
       </div>
       <div class="section">
@@ -225,6 +246,7 @@
           <li><strong>Keywords</strong> — job title, skills, or role (e.g. "python developer", "data scientist").</li>
           <li><strong>Location</strong> — city, country, or "Remote". LinkedIn is fuzzy here; leave blank for worldwide.</li>
           <li><strong>Workplace</strong> — filter to Remote, Hybrid, or On-site only.</li>
+          <li><strong>Language</strong> — hints LinkedIn's locale (sent as Accept-Language) toward postings in that language. A soft hint, not a hard filter — LinkedIn mostly returns the region's language.</li>
           <li><strong>Date posted</strong> — limit to jobs posted in the last 24 h / week / month.</li>
           <li><strong>Max results</strong> — up to 200 (each page is 25 listings, so 200 = 8 pages).</li>
           <li><strong>Fetch full details</strong> — fetches each job's detail page for seniority, employment type, full description, and applicant count. Slower (one extra request per listing) but richer data.</li>
@@ -239,6 +261,7 @@
         <ul>
           <li><strong>Rate limiting</strong> — LinkedIn blocks rapid requests. Searches include jittered delays (2–5 s per page) and automatic 429 backoff. A large search can take a minute.</li>
           <li><strong>People search (Find leaders)</strong> — LinkedIn's public people search is login-gated. The button attempts a best-effort scrape but usually returns no results.</li>
+          <li><strong>Company profiles</strong> — opening a company auto-fetches its public profile (industry, size, website, HQ) once, best-effort. Logged-out company pages are sparse and may be blocked, so some fields stay blank.</li>
           <li><strong>Fragile selectors</strong> — LinkedIn changes its HTML markup without notice. If results are empty or fields are missing, selectors in <code>src/parser.py</code> may need updating.</li>
           <li><strong>Public data only</strong> — no private profiles, no messages, no company internal data.</li>
         </ul>
@@ -326,6 +349,7 @@
         location: $("location").value.trim() || null,
         workplace_type: $("workplace_type").value || null,
         posted_within_seconds: Number($("posted_within").value) || null,
+        language: $("language").value || null,
         max_results: Number($("max_results").value) || 25,
         details: $("details").checked,
       };
@@ -428,17 +452,72 @@
 
     // ---------- explore ----------
     let exploreView = "positions";   // "positions" | "companies"
+    // text + location filter client-side (instant); workplace + language hit
+    // the backend (they're listing-level) and trigger a refetch.
+    const exploreFilters = { text: "", location: "", workplace: "", language: "" };
+    const LANG_OPTS = [["", "Any language"], ["en", "English"], ["de", "German"], ["fr", "French"],
+      ["es", "Spanish"], ["nl", "Dutch"], ["it", "Italian"], ["pt", "Portuguese"]];
+
+    function exploreQuery() {
+      const p = new URLSearchParams();
+      if (exploreFilters.workplace) p.set("workplace_type", exploreFilters.workplace);
+      if (exploreFilters.language) p.set("language", exploreFilters.language);
+      const s = p.toString();
+      return s ? "?" + s : "";
+    }
 
     function loadExplore() {
-      const bar = `<div style="display:flex;gap:8px;margin-bottom:14px">
-        <button class="btn-ghost btn-sm" id="ex-pos" ${exploreView === "positions" ? "style='font-weight:700'" : ""}>By position</button>
-        <button class="btn-ghost btn-sm" id="ex-co" ${exploreView === "companies" ? "style='font-weight:700'" : ""}>By company</button>
-      </div>`;
-      view.innerHTML = bar + `<div id="explore-body"></div>`;
-      $("ex-pos").addEventListener("click", () => { exploreView = "positions"; loadExplore(); });
-      $("ex-co").addEventListener("click", () => { exploreView = "companies"; loadExplore(); });
+      const langOpts = LANG_OPTS.map(([v, l]) =>
+        `<option value="${v}" ${exploreFilters.language === v ? "selected" : ""}>${l}</option>`).join("");
+      view.innerHTML = `
+        <div class="explore-bar">
+          <button class="btn-ghost btn-sm" id="ex-pos">By position</button>
+          <button class="btn-ghost btn-sm" id="ex-co">By company</button>
+          <span class="sep"></span>
+          <input id="ex-text" type="text" placeholder="Filter by name…" />
+          <input id="ex-loc" type="text" placeholder="Location…" />
+          <select id="ex-wt">
+            <option value="">Any workplace</option>
+            <option value="remote">Remote</option>
+            <option value="hybrid">Hybrid</option>
+            <option value="on_site">On-site</option>
+          </select>
+          <select id="ex-lang">${langOpts}</select>
+        </div>
+        <div id="explore-body"></div>`;
+      $("ex-text").value = exploreFilters.text;
+      $("ex-loc").value = exploreFilters.location;
+      $("ex-wt").value = exploreFilters.workplace;
+      $("ex-pos").addEventListener("click", () => { exploreView = "positions"; reloadExploreBody(); });
+      $("ex-co").addEventListener("click", () => { exploreView = "companies"; reloadExploreBody(); });
+      $("ex-text").addEventListener("input", () => { exploreFilters.text = $("ex-text").value; applyExploreClientFilters(); });
+      $("ex-loc").addEventListener("input", () => { exploreFilters.location = $("ex-loc").value; applyExploreClientFilters(); });
+      $("ex-wt").addEventListener("change", () => { exploreFilters.workplace = $("ex-wt").value; reloadExploreBody(); });
+      $("ex-lang").addEventListener("change", () => { exploreFilters.language = $("ex-lang").value; reloadExploreBody(); });
+      reloadExploreBody();
+    }
+
+    function reloadExploreBody() {
+      $("ex-pos").style.fontWeight = exploreView === "positions" ? "700" : "";
+      $("ex-co").style.fontWeight = exploreView === "companies" ? "700" : "";
       if (exploreView === "companies") loadExploreCompanies();
       else loadPositions();
+    }
+
+    function applyExploreClientFilters() {
+      const body = $("explore-body");
+      if (!body) return;
+      const t = exploreFilters.text.trim().toLowerCase();
+      const l = exploreFilters.location.trim().toLowerCase();
+      let shown = 0;
+      body.querySelectorAll("tbody tr[data-filter]").forEach((tr) => {
+        const ok = (!t || (tr.dataset.filter || "").toLowerCase().includes(t)) &&
+                   (!l || (tr.dataset.loc || "").toLowerCase().includes(l));
+        tr.style.display = ok ? "" : "none";
+        if (ok) shown++;
+      });
+      const note = $("ex-empty");
+      if (note) note.style.display = shown === 0 ? "" : "none";
     }
 
     async function loadPositions() {
@@ -446,12 +525,12 @@
       if (!body) return;                              // navigated away before render
       setStatus(true, "Loading positions…");
       try {
-        const data = await api("/api/positions");
+        const data = await api("/api/positions" + exploreQuery());
         if (!$("explore-body")) return;               // navigated away mid-fetch
         setStatus(false, `<span class="pill">${data.count} positions</span> you've searched. Click one to see who's hiring.`);
-        if (!data.positions.length) { body.innerHTML = `<div class="empty">No saved positions yet. Run a search on the Jobs tab.</div>`; return; }
+        if (!data.positions.length) { body.innerHTML = `<div class="empty">No saved positions match. Run a search on the Jobs tab.</div>`; return; }
         const rows = data.positions.map((p) => `
-          <tr class="clickable" data-pos="${p.id}" data-label="${esc(p.keyword)}${p.location ? " · " + esc(p.location) : ""}">
+          <tr class="clickable" data-pos="${p.id}" data-label="${esc(p.keyword)}${p.location ? " · " + esc(p.location) : ""}" data-filter="${esc(p.keyword)}" data-loc="${esc(p.location||'')}">
             <td><b>${esc(p.keyword)}</b></td>
             <td>${esc(p.location || "—")}</td>
             <td class="num-cell">${p.company_count}</td>
@@ -459,6 +538,7 @@
             <td><button class="btn-ghost btn-sm search-more-btn" data-kw="${esc(p.keyword)}" data-loc="${esc(p.location||'')}">Search more</button></td>
           </tr>`).join("");
         body.innerHTML = `<table><thead><tr><th>Position</th><th>Location</th><th>Companies</th><th>Listings</th><th></th></tr></thead><tbody>${rows}</tbody></table>
+          <div id="ex-empty" class="empty" style="display:none">No rows match your filter.</div>
           <div id="explore-detail" style="margin-top:18px"></div>`;
         body.querySelectorAll("[data-pos]").forEach((tr) =>
           tr.addEventListener("click", () => loadPositionDetail(tr.dataset.pos, tr.dataset.label)));
@@ -467,6 +547,7 @@
             e.stopPropagation();
             searchMoreForPosition(btn.dataset.kw, btn.dataset.loc || null);
           }));
+        applyExploreClientFilters();
       } catch (err) { setStatus(false, `❌ ${esc(err.message)}`); }
     }
 
@@ -475,23 +556,25 @@
       if (!body) return;
       setStatus(true, "Loading companies…");
       try {
-        const data = await api("/api/companies");
+        const data = await api("/api/companies" + exploreQuery());
         if (!$("explore-body")) return;
         setStatus(false, `<span class="pill">${data.count} companies</span> saved. Click one to see the positions it's hiring for.`);
-        if (!data.companies.length) { body.innerHTML = `<div class="empty">No saved companies yet. Run a search on the Jobs tab.</div>`; return; }
+        if (!data.companies.length) { body.innerHTML = `<div class="empty">No saved companies match. Run a search on the Jobs tab.</div>`; return; }
         const rows = data.companies.map((c) => `
-          <tr class="clickable" data-co="${c.id}" data-name="${esc(c.name)}">
+          <tr class="clickable" data-co="${c.id}" data-name="${esc(c.name)}" data-filter="${esc(c.name)}" data-loc="${esc(c.location||'')}">
             <td><b>${esc(c.name)}</b>${c.industry ? `<div style="color:var(--muted);font-size:12px">${esc(c.industry)}</div>` : ""}</td>
             <td class="num-cell">${c.listing_count}</td>
             <td>${esc(c.location || "—")}</td>
             <td><button class="btn-ghost btn-sm" data-view="${c.id}">View</button></td>
           </tr>`).join("");
         body.innerHTML = `<table><thead><tr><th>Company</th><th>Listings</th><th>Location</th><th></th></tr></thead><tbody>${rows}</tbody></table>
+          <div id="ex-empty" class="empty" style="display:none">No rows match your filter.</div>
           <div id="explore-detail" style="margin-top:18px"></div>`;
         body.querySelectorAll("[data-co]").forEach((tr) =>
           tr.addEventListener("click", () => loadCompanyPositions(tr.dataset.co, tr.dataset.name)));
         body.querySelectorAll("[data-view]").forEach((b) =>
           b.addEventListener("click", (e) => { e.stopPropagation(); openCompany(b.dataset.view); }));
+        applyExploreClientFilters();
       } catch (err) { setStatus(false, `❌ ${esc(err.message)}`); }
     }
 
@@ -535,7 +618,7 @@
           <button class="btn-ghost btn-sm" id="toggle-li" ${activeView === "listings" ? "style='font-weight:700'" : ""}>Listings</button>
         </div>`;
         if (activeView === "companies") {
-          const data = await api(`/api/positions/${posId}/companies`);
+          const data = await api(`/api/positions/${posId}/companies` + exploreQuery());
           const rows = data.companies.map((c) => `
             <tr class="clickable" data-company="${c.id}">
               <td><b>${esc(c.name)}</b></td><td class="num-cell">${c.listing_count}</td>
@@ -547,16 +630,17 @@
           target.querySelectorAll("[data-company]").forEach((tr) =>
             tr.addEventListener("click", () => openCompany(tr.dataset.company)));
         } else {
-          const data = await api(`/api/positions/${posId}/listings`);
+          const data = await api(`/api/positions/${posId}/listings` + exploreQuery());
           const rows = data.listings.map((j) => `
             <tr>
               <td>${j.url ? `<a class="link" href="${esc(j.url)}" target="_blank" rel="noopener">${esc(j.title)}</a>` : esc(j.title)}</td>
               <td>${esc(j.company)}</td>
               <td>${esc(j.location || "—")}</td>
+              <td>${j.language ? esc(j.language.toUpperCase()) : "—"}</td>
               <td>${j.posted_at ? esc(j.posted_at) : "—"}</td>
             </tr>`).join("");
           target.innerHTML = toggleHtml + `<h3 style="font-size:15px;margin:0 0 8px">Listings for "${esc(label)}" (${data.count})</h3>
-            <table><thead><tr><th>Title</th><th>Company</th><th>Location</th><th>Posted</th></tr></thead><tbody>${rows || '<tr><td colspan="4" class="empty">No listings stored.</td></tr>'}</tbody></table>`;
+            <table><thead><tr><th>Title</th><th>Company</th><th>Location</th><th>Lang</th><th>Posted</th></tr></thead><tbody>${rows || '<tr><td colspan="5" class="empty">No listings stored.</td></tr>'}</tbody></table>`;
         }
         $("toggle-co").addEventListener("click", () => loadPositionDetail(posId, label, "companies"));
         $("toggle-li").addEventListener("click", () => loadPositionDetail(posId, label, "listings"));
@@ -577,13 +661,24 @@
     }
 
     let currentCompany = null;
+    const autoEnriched = new Set();   // company ids we've already auto-fetched this session
     async function openCompany(id) {
       openDrawer("Company", "");
       try {
         const data = await api(`/api/companies/${id}`);
         currentCompany = data.company;
         renderCompanyDrawer(data);
+        maybeAutoEnrich(data.company);
       } catch (err) { $("drawer-body").innerHTML = `❌ ${esc(err.message)}`; }
+    }
+
+    function maybeAutoEnrich(c) {
+      // Auto-fetch the public LinkedIn profile the first time a company is opened
+      // (best-effort, non-blocking). Skip if already enriched, no handle, or tried.
+      const enriched = c.industry || c.company_size || c.website || c.description;
+      if (enriched || !c.slug || autoEnriched.has(c.id)) return;
+      autoEnriched.add(c.id);
+      enrichCompany(c.id, { silent: true });
     }
 
     function renderCompanyDrawer(data) {
@@ -616,14 +711,23 @@
       $("btn-people").addEventListener("click", () => findLeaders(c.id));
     }
 
-    async function enrichCompany(id) {
-      const btn = $("btn-enrich"); btn.disabled = true; btn.textContent = "Enriching…";
+    async function enrichCompany(id, opts = {}) {
+      const btn = $("btn-enrich");
+      if (btn) { btn.disabled = true; btn.textContent = "Fetching profile…"; }
       try {
         const data = await api(`/api/companies/${id}/enrich`, { method: "POST" });
+        // Bail if the user navigated to another company while we were fetching.
+        if (!currentCompany || currentCompany.id !== id) return;
         const full = await api(`/api/companies/${id}`);
+        if (!currentCompany || currentCompany.id !== id) return;
+        currentCompany = full.company;
         renderCompanyDrawer(full);
         if (data.note) $("drawer-body").insertAdjacentHTML("afterbegin", `<div class="hint">${esc(data.note)}</div>`);
-      } catch (err) { btn.disabled = false; btn.textContent = "↻ Enrich company"; alert(err.message); }
+      } catch (err) {
+        const b = $("btn-enrich");
+        if (b) { b.disabled = false; b.textContent = "↻ Enrich company"; }
+        if (!opts.silent) alert(err.message);
+      }
     }
 
     async function findLeaders(id) {
