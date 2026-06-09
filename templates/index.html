@@ -406,10 +406,10 @@
           </tr>`).join("");
         view.innerHTML = `<table><thead><tr><th>Position</th><th>Location</th><th>Companies</th><th>Listings</th><th></th></tr></thead><tbody>${rows}</tbody></table>
           <div id="explore-companies" style="margin-top:18px"></div>`;
-        view.querySelectorAll(“[data-pos]”).forEach((tr) =>
-          tr.addEventListener(“click”, () => loadPositionDetail(tr.dataset.pos, tr.dataset.label)));
-        view.querySelectorAll(“.search-more-btn”).forEach((btn) =>
-          btn.addEventListener(“click”, (e) => {
+        view.querySelectorAll("[data-pos]").forEach((tr) =>
+          tr.addEventListener("click", () => loadPositionDetail(tr.dataset.pos, tr.dataset.label)));
+        view.querySelectorAll(".search-more-btn").forEach((btn) =>
+          btn.addEventListener("click", (e) => {
             e.stopPropagation();
             searchMoreForPosition(btn.dataset.kw, btn.dataset.loc || null);
           }));
@@ -417,52 +417,52 @@
     }
 
     async function searchMoreForPosition(kw, loc) {
-      setStatus(true, `Searching more for “${esc(kw)}”…`);
+      setStatus(true, `Searching more for "${esc(kw)}"…`);
       try {
-        const data = await api(“/api/companies/search”, {
-          method: “POST”,
-          headers: { “Content-Type”: “application/json” },
+        const data = await api("/api/companies/search", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ keywords: kw, location: loc, max_results: 25, details: $("details").checked }),
         });
-        setStatus(false, `<span class=”pill”>${data.new_companies} new companies</span> found for “${esc(kw)}”.`);
+        setStatus(false, `<span class="pill">${data.new_companies} new companies</span> found for "${esc(kw)}".`);
         await loadPositions();
       } catch (err) { setStatus(false, `❌ ${esc(err.message)}`); }
     }
 
-    async function loadPositionDetail(posId, label, activeView = “companies”) {
-      const target = $(“explore-companies”);
-      target.innerHTML = `<div class=”status”><span class=”spinner”></span><span>Loading…</span></div>`;
+    async function loadPositionDetail(posId, label, activeView = "companies") {
+      const target = $("explore-companies");
+      target.innerHTML = `<div class="status"><span class="spinner"></span><span>Loading…</span></div>`;
       try {
-        const toggleHtml = `<div style=”display:flex;gap:8px;margin-bottom:12px”>
-          <button class=”btn-ghost btn-sm” id=”toggle-co” ${activeView === “companies” ? “style='font-weight:700'” : “”}>Companies</button>
-          <button class=”btn-ghost btn-sm” id=”toggle-li” ${activeView === “listings” ? “style='font-weight:700'” : “”}>Listings</button>
+        const toggleHtml = `<div style="display:flex;gap:8px;margin-bottom:12px">
+          <button class="btn-ghost btn-sm" id="toggle-co" ${activeView === "companies" ? "style='font-weight:700'" : ""}>Companies</button>
+          <button class="btn-ghost btn-sm" id="toggle-li" ${activeView === "listings" ? "style='font-weight:700'" : ""}>Listings</button>
         </div>`;
-        if (activeView === “companies”) {
+        if (activeView === "companies") {
           const data = await api(`/api/positions/${posId}/companies`);
           const rows = data.companies.map((c) => `
-            <tr class=”clickable” data-company=”${c.id}”>
-              <td><b>${esc(c.name)}</b></td><td class=”num-cell”>${c.listing_count}</td>
-              <td>${esc(c.location || “—“)}</td>
-              <td><button class=”btn-ghost btn-sm” data-view=”${c.id}”>View</button></td>
-            </tr>`).join(“”);
-          target.innerHTML = toggleHtml + `<h3 style=”font-size:15px;margin:0 0 8px”>Companies hiring for “${esc(label)}” (${data.count})</h3>
+            <tr class="clickable" data-company="${c.id}">
+              <td><b>${esc(c.name)}</b></td><td class="num-cell">${c.listing_count}</td>
+              <td>${esc(c.location || "—")}</td>
+              <td><button class="btn-ghost btn-sm" data-view="${c.id}">View</button></td>
+            </tr>`).join("");
+          target.innerHTML = toggleHtml + `<h3 style="font-size:15px;margin:0 0 8px">Companies hiring for "${esc(label)}" (${data.count})</h3>
             <table><thead><tr><th>Company</th><th>Listings</th><th>Location</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
-          target.querySelectorAll(“[data-company]”).forEach((tr) =>
-            tr.addEventListener(“click”, () => openCompany(tr.dataset.company)));
+          target.querySelectorAll("[data-company]").forEach((tr) =>
+            tr.addEventListener("click", () => openCompany(tr.dataset.company)));
         } else {
           const data = await api(`/api/positions/${posId}/listings`);
           const rows = data.listings.map((j) => `
             <tr>
-              <td>${j.url ? `<a class=”link” href=”${esc(j.url)}” target=”_blank” rel=”noopener”>${esc(j.title)}</a>` : esc(j.title)}</td>
+              <td>${j.url ? `<a class="link" href="${esc(j.url)}" target="_blank" rel="noopener">${esc(j.title)}</a>` : esc(j.title)}</td>
               <td>${esc(j.company)}</td>
-              <td>${esc(j.location || “—“)}</td>
-              <td>${j.posted_at ? esc(j.posted_at) : “—“}</td>
-            </tr>`).join(“”);
-          target.innerHTML = toggleHtml + `<h3 style=”font-size:15px;margin:0 0 8px”>Listings for “${esc(label)}” (${data.count})</h3>
-            <table><thead><tr><th>Title</th><th>Company</th><th>Location</th><th>Posted</th></tr></thead><tbody>${rows || '<tr><td colspan=”4” class=”empty”>No listings stored.</td></tr>'}</tbody></table>`;
+              <td>${esc(j.location || "—")}</td>
+              <td>${j.posted_at ? esc(j.posted_at) : "—"}</td>
+            </tr>`).join("");
+          target.innerHTML = toggleHtml + `<h3 style="font-size:15px;margin:0 0 8px">Listings for "${esc(label)}" (${data.count})</h3>
+            <table><thead><tr><th>Title</th><th>Company</th><th>Location</th><th>Posted</th></tr></thead><tbody>${rows || '<tr><td colspan="4" class="empty">No listings stored.</td></tr>'}</tbody></table>`;
         }
-        $(“toggle-co”).addEventListener(“click”, () => loadPositionDetail(posId, label, “companies”));
-        $(“toggle-li”).addEventListener(“click”, () => loadPositionDetail(posId, label, “listings”));
+        $("toggle-co").addEventListener("click", () => loadPositionDetail(posId, label, "companies"));
+        $("toggle-li").addEventListener("click", () => loadPositionDetail(posId, label, "listings"));
       } catch (err) { target.innerHTML = `❌ ${esc(err.message)}`; }
     }
 
