@@ -298,7 +298,7 @@
           <li><strong>Jobs</strong> — search LinkedIn and save listings. Each search appends new results; duplicates are skipped.</li>
           <li><strong>Companies</strong> — run a search and see which companies are hiring for that role, grouped by employer. Use <em>Show saved</em> to browse without a new scrape.</li>
           <li><strong>Batch</strong> — search many roles at once: paste keywords (one per line) and set how many companies to collect per term. Each runs in turn and is saved; results show up in Explore.</li>
-          <li><strong>Explore</strong> — browse your saved data without hitting LinkedIn. Three views: <em>By position</em> (real job titles found, seniority merged), <em>By search</em> (the searches you ran), and <em>By company</em>. Click a row to drill into its companies/listings. Filter by name/location (instant), or by workplace type and detected language (re-queries the database).</li>
+          <li><strong>Explore</strong> — browse your saved data without hitting LinkedIn. Four views: <em>By position</em> (real job titles, seniority merged), <em>By industry</em> (the job's industry / working sphere), <em>By search</em> (the searches you ran), and <em>By company</em>. Click a row to drill in. Filter by name/location (instant), or by workplace type, detected language and industry (re-queries the database). Industry comes from a job's detail page — turn on <em>Fetch full details</em> or use <em>⟳ Re-fetch details</em> to populate it.</li>
         </ul>
       </div>
       <div class="section">
@@ -704,30 +704,42 @@
     }
 
     // ---------- explore ----------
-    let exploreView = "titles";   // "titles" (real positions) | "searches" | "companies"
-    // text + location filter client-side (instant); workplace + language hit
-    // the backend (they're listing-level) and trigger a refetch.
-    const exploreFilters = { text: "", location: "", workplace: "", language: "" };
+    let exploreView = "titles";   // "titles" | "searches" | "companies" | "industries"
+    // text + location filter client-side (instant); workplace + language + industry
+    // hit the backend (they're listing-level) and trigger a refetch.
+    const exploreFilters = { text: "", location: "", workplace: "", language: "", industry: "" };
     const LANG_OPTS = [["", "Any language"], ["en", "English"], ["de", "German"], ["fr", "French"],
       ["es", "Spanish"], ["nl", "Dutch"], ["it", "Italian"], ["pt", "Portuguese"], ["ru", "Russian"]];
 
-    function exploreQuery() {
-      const p = new URLSearchParams();
+    // Append the active server-side filters (workplace/language/industry) to a query.
+    function withFilters(p) {
       if (exploreFilters.workplace) p.set("workplace_type", exploreFilters.workplace);
       if (exploreFilters.language) p.set("language", exploreFilters.language);
-      const s = p.toString();
+      if (exploreFilters.industry) p.set("industry", exploreFilters.industry);
+      return p;
+    }
+
+    function exploreQuery() {
+      const s = withFilters(new URLSearchParams()).toString();
       return s ? "?" + s : "";
     }
 
-    // True when a server-side (workplace/language) filter is narrowing results —
-    // used to explain an empty result as "nothing matched" vs "no data yet".
+    // True when a server-side filter is narrowing results — used to explain an
+    // empty result as "nothing matched" vs "no data yet".
     function exploreFilterActive() {
-      return !!(exploreFilters.workplace || exploreFilters.language);
+      return !!(exploreFilters.workplace || exploreFilters.language || exploreFilters.industry);
     }
 
     function titleQuery(key) {
-      const p = new URLSearchParams();
+      const p = withFilters(new URLSearchParams());
       p.set("title", key);
+      return "?" + p.toString();
+    }
+
+    // Drill-down by a clicked industry (that value is the filter; keep workplace/language).
+    function industryQuery(value) {
+      const p = new URLSearchParams();
+      p.set("industry", value);
       if (exploreFilters.workplace) p.set("workplace_type", exploreFilters.workplace);
       if (exploreFilters.language) p.set("language", exploreFilters.language);
       return "?" + p.toString();
@@ -739,6 +751,7 @@
       view.innerHTML = `
         <div class="explore-bar">
           <button class="btn-ghost btn-sm" id="ex-titles" title="Real job titles found, grouped">By position</button>
+          <button class="btn-ghost btn-sm" id="ex-ind" title="The job's industry / working sphere">By industry</button>
           <button class="btn-ghost btn-sm" id="ex-search" title="The searches you have run">By search</button>
           <button class="btn-ghost btn-sm" id="ex-co">By company</button>
           <span class="sep"></span>
@@ -751,35 +764,41 @@
             <option value="on_site">On-site</option>
           </select>
           <select id="ex-lang">${langOpts}</select>
+          <select id="ex-industry" title="Industry / working sphere"><option value="">Any industry</option></select>
         </div>
         <div id="explore-body"></div>`;
       $("ex-text").value = exploreFilters.text;
       $("ex-loc").value = exploreFilters.location;
       $("ex-wt").value = exploreFilters.workplace;
       $("ex-titles").addEventListener("click", () => { exploreView = "titles"; reloadExploreBody(); });
+      $("ex-ind").addEventListener("click", () => { exploreView = "industries"; reloadExploreBody(); });
       $("ex-search").addEventListener("click", () => { exploreView = "searches"; reloadExploreBody(); });
       $("ex-co").addEventListener("click", () => { exploreView = "companies"; reloadExploreBody(); });
       $("ex-text").addEventListener("input", () => { exploreFilters.text = $("ex-text").value; applyExploreClientFilters(); });
       $("ex-loc").addEventListener("input", () => { exploreFilters.location = $("ex-loc").value; applyExploreClientFilters(); });
       $("ex-wt").addEventListener("change", () => { exploreFilters.workplace = $("ex-wt").value; reloadExploreBody(); });
       $("ex-lang").addEventListener("change", () => { exploreFilters.language = $("ex-lang").value; reloadExploreBody(); });
+      $("ex-industry").addEventListener("change", () => { exploreFilters.industry = $("ex-industry").value; reloadExploreBody(); });
+      populateIndustryFilter();   // fill the industry dropdown from saved data
       reloadExploreBody();
     }
 
     function reloadExploreBody() {
       $("ex-titles").style.fontWeight = exploreView === "titles" ? "700" : "";
+      $("ex-ind").style.fontWeight = exploreView === "industries" ? "700" : "";
       $("ex-search").style.fontWeight = exploreView === "searches" ? "700" : "";
       $("ex-co").style.fontWeight = exploreView === "companies" ? "700" : "";
-      // Positions (titles) aggregate across all locations, so a per-row location
-      // filter is meaningless there — disable it rather than silently no-op.
-      const titlesView = exploreView === "titles";
-      $("ex-loc").disabled = titlesView;
-      $("ex-loc").title = titlesView
-        ? "Positions span all locations — switch to By search / By company to filter by location"
+      // Positions and industries aggregate across all locations, so a per-row
+      // location filter is meaningless there — disable it rather than no-op.
+      const noLoc = exploreView === "titles" || exploreView === "industries";
+      $("ex-loc").disabled = noLoc;
+      $("ex-loc").title = noLoc
+        ? "This view spans all locations — switch to By search / By company to filter by location"
         : "";
       exportBar.innerHTML = "";   // only the By-company view offers a download (set below)
       if (exploreView === "companies") loadExploreCompanies();
       else if (exploreView === "searches") loadPositions();
+      else if (exploreView === "industries") loadIndustries();
       else loadPositionTitles();
     }
 
@@ -883,6 +902,69 @@
       } catch (err) { setStatus(false, `❌ ${esc(err.message)}`); }
     }
 
+    // Fill the industry filter dropdown from the industries present in saved data.
+    async function populateIndustryFilter() {
+      const sel = $("ex-industry");
+      if (!sel) return;
+      try {
+        const data = await api("/api/industries");
+        const current = exploreFilters.industry;
+        sel.innerHTML = `<option value="">Any industry</option>` + data.industries.map((g) =>
+          `<option value="${esc(g.key)}" ${g.key === current ? "selected" : ""}>${esc(g.industry)} (${g.listing_count})</option>`).join("");
+        sel.value = current;
+      } catch (_) { /* leave the default "Any industry" */ }
+    }
+
+    async function loadIndustries() {
+      const body = $("explore-body");
+      if (!body) return;
+      setStatus(true, "Loading industries…");
+      try {
+        const data = await api("/api/industries" + exploreQuery());
+        if (!$("explore-body")) return;
+        setStatus(false, `<span class="pill">${data.count} industries</span> across your detailed listings. Click one to see its companies.`);
+        if (!data.industries.length) {
+          body.innerHTML = `<div class="empty">${exploreFilterActive()
+            ? "No industries match the current filters."
+            : "No industries yet — a job's industry comes from its detail page. Turn on 'Fetch full details' when searching, or use ⟳ Re-fetch details."}</div>`;
+          return;
+        }
+        const rows = data.industries.map((g) => `
+          <tr class="clickable" data-ind="${esc(g.key)}" data-filter="${esc(g.industry)}" data-loc="">
+            <td><b>${esc(g.industry)}</b></td>
+            <td class="num-cell">${g.company_count}</td>
+            <td class="num-cell">${g.listing_count}</td>
+          </tr>`).join("");
+        body.innerHTML = `<table><thead><tr><th>Industry / sphere</th><th>Companies</th><th>Listings</th></tr></thead><tbody>${rows}</tbody></table>
+          <div id="ex-empty" class="empty" style="display:none">No rows match your filter.</div>
+          <div id="explore-detail" style="margin-top:18px"></div>`;
+        body.querySelectorAll("[data-ind]").forEach((tr) =>
+          tr.addEventListener("click", () => loadIndustryCompanies(tr.dataset.ind)));
+        applyExploreClientFilters();
+      } catch (err) { setStatus(false, `❌ ${esc(err.message)}`); }
+    }
+
+    async function loadIndustryCompanies(industry) {
+      const target = $("explore-detail");
+      if (!target) return;
+      target.innerHTML = `<div class="status"><span class="spinner"></span><span>Loading…</span></div>`;
+      try {
+        const data = await api("/api/industries/companies" + industryQuery(industry));
+        const rows = data.companies.map((c) => `
+          <tr class="clickable" data-co="${c.id}" data-name="${esc(c.name)}">
+            <td><b>${esc(c.name)}</b></td><td class="num-cell">${c.listing_count}</td>
+            <td>${esc(c.location || "—")}</td>
+            <td><button class="btn-ghost btn-sm" data-view="${c.id}">View</button></td>
+          </tr>`).join("");
+        target.innerHTML = `<h3 style="font-size:15px;margin:0 0 8px">Companies in "${esc(industry)}" (${data.count})</h3>
+          <table><thead><tr><th>Company</th><th>Listings</th><th>Location</th><th></th></tr></thead><tbody>${rows || '<tr><td colspan="4" class="empty">No companies.</td></tr>'}</tbody></table>`;
+        target.querySelectorAll("[data-co]").forEach((tr) =>
+          tr.addEventListener("click", () => loadCompanyPositions(tr.dataset.co, tr.dataset.name)));
+        target.querySelectorAll("[data-view]").forEach((b) =>
+          b.addEventListener("click", (e) => { e.stopPropagation(); openCompany(b.dataset.view); }));
+      } catch (err) { target.innerHTML = `❌ ${esc(err.message)}`; }
+    }
+
     async function loadTitleDetail(key, label, activeView = "companies") {
       const target = $("explore-detail");
       if (!target) return;
@@ -912,10 +994,11 @@
               <td>${esc(j.company)}</td>
               <td>${esc(j.location || "—")}</td>
               <td>${j.language ? esc(j.language.toUpperCase()) : "—"}</td>
+              <td>${esc(j.industries || "—")}</td>
               <td>${j.posted_at ? esc(j.posted_at) : "—"}</td>
             </tr>`).join("");
           target.innerHTML = toggleHtml + `<h3 style="font-size:15px;margin:0 0 8px">Listings for "${esc(label)}" (${data.count})</h3>
-            <table><thead><tr><th>Title</th><th>Company</th><th>Location</th><th>Lang</th><th>Posted</th></tr></thead><tbody>${rows || '<tr><td colspan="5" class="empty">No listings stored.</td></tr>'}</tbody></table>`;
+            <table><thead><tr><th>Title</th><th>Company</th><th>Location</th><th>Lang</th><th>Industry</th><th>Posted</th></tr></thead><tbody>${rows || '<tr><td colspan="6" class="empty">No listings stored.</td></tr>'}</tbody></table>`;
         }
         $("toggle-co").addEventListener("click", () => loadTitleDetail(key, label, "companies"));
         $("toggle-li").addEventListener("click", () => loadTitleDetail(key, label, "listings"));
@@ -981,10 +1064,11 @@
               <td>${esc(j.company)}</td>
               <td>${esc(j.location || "—")}</td>
               <td>${j.language ? esc(j.language.toUpperCase()) : "—"}</td>
+              <td>${esc(j.industries || "—")}</td>
               <td>${j.posted_at ? esc(j.posted_at) : "—"}</td>
             </tr>`).join("");
           target.innerHTML = toggleHtml + `<h3 style="font-size:15px;margin:0 0 8px">Listings for "${esc(label)}" (${data.count})</h3>
-            <table><thead><tr><th>Title</th><th>Company</th><th>Location</th><th>Lang</th><th>Posted</th></tr></thead><tbody>${rows || '<tr><td colspan="5" class="empty">No listings stored.</td></tr>'}</tbody></table>`;
+            <table><thead><tr><th>Title</th><th>Company</th><th>Location</th><th>Lang</th><th>Industry</th><th>Posted</th></tr></thead><tbody>${rows || '<tr><td colspan="6" class="empty">No listings stored.</td></tr>'}</tbody></table>`;
         }
         $("toggle-co").addEventListener("click", () => loadPositionDetail(posId, label, "companies"));
         $("toggle-li").addEventListener("click", () => loadPositionDetail(posId, label, "listings"));

@@ -229,6 +229,33 @@ def test_refetch_details_stream(client: TestClient, monkeypatch: pytest.MonkeyPa
     assert again_events[-1] == {"type": "result", "count": 0, "enriched": 0}
 
 
+def test_industries_endpoints(client: TestClient) -> None:
+    async def seed() -> None:
+        async with Storage() as storage:
+            await storage.save_search_results(
+                [
+                    JobListing(
+                        job_id="9", title="Dev", company="Acme Inc",
+                        company_url="https://www.linkedin.com/company/acme-inc",
+                        industries="Software Development",
+                    )
+                ],
+                keyword="seed",
+            )
+
+    asyncio.run(seed())
+    industries = client.get("/api/industries").json()
+    assert any(g["key"] == "Software Development" for g in industries["industries"])
+    companies = client.get(
+        "/api/industries/companies", params={"industry": "Software Development"}
+    ).json()
+    assert any(c["name"] == "Acme Inc" for c in companies["companies"])
+    # The industry filter is accepted on the other Explore endpoints.
+    positions = client.get("/api/positions", params={"industry": "Software Development"})
+    assert positions.status_code == 200
+    assert client.get("/api/companies", params={"industry": "Nope"}).json()["count"] == 0
+
+
 def test_export_listings_csv(client: TestClient) -> None:
     res = client.get("/api/export/listings.csv")
     assert res.status_code == 200

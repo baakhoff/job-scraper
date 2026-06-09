@@ -363,3 +363,35 @@ async def test_get_listings_needing_details(storage: Storage) -> None:
     needing = await storage.get_listings_needing_details()
     assert {j.job_id for j in needing} == {"2", "3"}
     assert len(await storage.get_listings_needing_details(limit=1)) == 1
+
+
+async def test_industry_grouping_and_filter(storage: Storage) -> None:
+    await storage.save_search_results(
+        [
+            _job("1", company="Acme", company_url=_ACME, industries="Software Development"),
+            _job("2", company="Globex", company_url=_GLOBEX, industries="Software Development"),
+            _job(
+                "3", company="Initech",
+                company_url="https://www.linkedin.com/company/initech",
+                industries="Financial Services",
+            ),
+            _job("4", company="Acme", company_url=_ACME),  # no industry → excluded from grouping
+        ],
+        keyword="mixed",
+        location=None,
+    )
+    groups = {g["key"]: g for g in await storage.get_industries()}
+    assert groups["Software Development"]["listing_count"] == 2
+    assert groups["Software Development"]["company_count"] == 2
+    assert groups["Financial Services"]["listing_count"] == 1
+    assert len(groups) == 2  # the null-industry listing is not its own group
+
+    # Drill-down: companies in an industry.
+    companies = await storage.get_companies_for_industry("Software Development")
+    assert {c.name for c in companies} == {"Acme", "Globex"}
+
+    # The industry filter narrows the other Explore queries too.
+    fin = await storage.get_positions(industry="Financial Services")
+    assert len(fin) == 1 and fin[0].listing_count == 1
+    titles = await storage.get_position_titles(industry="Software Development")
+    assert [t["listing_count"] for t in titles] == [2]  # one title group, 2 SD listings

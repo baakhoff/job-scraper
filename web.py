@@ -477,34 +477,44 @@ async def api_refetch_details(req: RefetchRequest) -> StreamingResponse:
 # --------------------------------------------------------------------------- #
 @app.get("/api/positions")
 async def api_positions(
-    workplace_type: WorkplaceType | None = None, language: str | None = None
+    workplace_type: WorkplaceType | None = None,
+    language: str | None = None,
+    industry: str | None = None,
 ) -> dict[str, object]:
     """All searched positions, with company/listing counts (optional filters)."""
     async with Storage() as storage:
-        positions = await storage.get_positions(workplace_type=workplace_type, language=language)
+        positions = await storage.get_positions(
+            workplace_type=workplace_type, language=language, industry=industry
+        )
     return {"count": len(positions), "positions": [_position_to_dict(p) for p in positions]}
 
 
 @app.get("/api/positions/{position_id}/companies")
 async def api_position_companies(
-    position_id: int, workplace_type: WorkplaceType | None = None, language: str | None = None
+    position_id: int,
+    workplace_type: WorkplaceType | None = None,
+    language: str | None = None,
+    industry: str | None = None,
 ) -> dict[str, object]:
-    """Companies hiring for a position (optional workplace/language filters)."""
+    """Companies hiring for a position (optional workplace/language/industry filters)."""
     async with Storage() as storage:
         companies = await storage.get_companies_for_position(
-            position_id, workplace_type=workplace_type, language=language
+            position_id, workplace_type=workplace_type, language=language, industry=industry
         )
     return {"count": len(companies), "companies": [_company_to_dict(c) for c in companies]}
 
 
 @app.get("/api/positions/{position_id}/listings")
 async def api_position_listings(
-    position_id: int, workplace_type: WorkplaceType | None = None, language: str | None = None
+    position_id: int,
+    workplace_type: WorkplaceType | None = None,
+    language: str | None = None,
+    industry: str | None = None,
 ) -> dict[str, object]:
-    """Job listings saved under a position (optional workplace/language filters)."""
+    """Job listings saved under a position (optional workplace/language/industry filters)."""
     async with Storage() as storage:
         listings = await storage.get_listings_for_position(
-            position_id, workplace_type=workplace_type, language=language
+            position_id, workplace_type=workplace_type, language=language, industry=industry
         )
     return {"count": len(listings), "listings": [_job_to_dict(j) for j in listings]}
 
@@ -514,36 +524,75 @@ async def api_position_listings(
 # --------------------------------------------------------------------------- #
 @app.get("/api/position-titles")
 async def api_position_titles(
-    workplace_type: WorkplaceType | None = None, language: str | None = None
+    workplace_type: WorkplaceType | None = None,
+    language: str | None = None,
+    industry: str | None = None,
 ) -> dict[str, object]:
     """Saved listings grouped by normalized job title (the real positions found)."""
     async with Storage() as storage:
-        titles = await storage.get_position_titles(workplace_type=workplace_type, language=language)
+        titles = await storage.get_position_titles(
+            workplace_type=workplace_type, language=language, industry=industry
+        )
     return {"count": len(titles), "titles": titles}
 
 
 @app.get("/api/position-titles/companies")
 async def api_title_companies(
-    title: str, workplace_type: WorkplaceType | None = None, language: str | None = None
+    title: str,
+    workplace_type: WorkplaceType | None = None,
+    language: str | None = None,
+    industry: str | None = None,
 ) -> dict[str, object]:
     """Companies hiring for a normalized-title position group (``title`` = its key)."""
     async with Storage() as storage:
         companies = await storage.get_companies_for_title(
-            title, workplace_type=workplace_type, language=language
+            title, workplace_type=workplace_type, language=language, industry=industry
         )
     return {"count": len(companies), "companies": [_company_to_dict(c) for c in companies]}
 
 
 @app.get("/api/position-titles/listings")
 async def api_title_listings(
-    title: str, workplace_type: WorkplaceType | None = None, language: str | None = None
+    title: str,
+    workplace_type: WorkplaceType | None = None,
+    language: str | None = None,
+    industry: str | None = None,
 ) -> dict[str, object]:
     """Listings under a normalized-title position group (``title`` = its key)."""
     async with Storage() as storage:
         listings = await storage.get_listings_for_title(
-            title, workplace_type=workplace_type, language=language
+            title, workplace_type=workplace_type, language=language, industry=industry
         )
     return {"count": len(listings), "listings": [_job_to_dict(j) for j in listings]}
+
+
+# --------------------------------------------------------------------------- #
+# Explore "By industry": saved listings grouped by the job's industry (sphere) #
+# --------------------------------------------------------------------------- #
+@app.get("/api/industries")
+async def api_industries(
+    workplace_type: WorkplaceType | None = None,
+    language: str | None = None,
+    industry: str | None = None,
+) -> dict[str, object]:
+    """Saved listings grouped by their job industry (the company's working sphere)."""
+    async with Storage() as storage:
+        industries = await storage.get_industries(
+            workplace_type=workplace_type, language=language, industry=industry
+        )
+    return {"count": len(industries), "industries": industries}
+
+
+@app.get("/api/industries/companies")
+async def api_industry_companies(
+    industry: str, workplace_type: WorkplaceType | None = None, language: str | None = None
+) -> dict[str, object]:
+    """Companies with a listing in the given industry (``industry`` = its key)."""
+    async with Storage() as storage:
+        companies = await storage.get_companies_for_industry(
+            industry, workplace_type=workplace_type, language=language
+        )
+    return {"count": len(companies), "companies": [_company_to_dict(c) for c in companies]}
 
 
 @app.get("/api/companies")
@@ -552,11 +601,16 @@ async def api_companies(
     limit: int = 200,
     workplace_type: WorkplaceType | None = None,
     language: str | None = None,
+    industry: str | None = None,
 ) -> dict[str, object]:
-    """All stored companies (optional name filter + workplace/language filters)."""
+    """All stored companies (name filter + workplace/language/industry filters)."""
     async with Storage() as storage:
         companies = await storage.get_companies(
-            keyword=keyword, limit=limit, workplace_type=workplace_type, language=language
+            keyword=keyword,
+            limit=limit,
+            workplace_type=workplace_type,
+            language=language,
+            industry=industry,
         )
     return {"count": len(companies), "companies": [_company_to_dict(c) for c in companies]}
 
