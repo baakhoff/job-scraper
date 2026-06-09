@@ -842,6 +842,14 @@ class Storage:
                 companies.append(rec.to_company(listing_count=cnt))
                 if filtered and limit is not None and len(companies) >= limit:
                     break
+            # Fill in each company's sphere from its listings where the (blocked)
+            # company-page enrichment left it empty.
+            derived = await _derive_company_industries(
+                session, {c.id for c in companies if not c.industry and c.id is not None}
+            )
+            for company in companies:
+                if not company.industry and company.id in derived:
+                    company.industry = derived[company.id]
             return companies
 
     async def get_company(self, company_id: int) -> Company | None:
@@ -857,7 +865,11 @@ class Storage:
                     .where(JobRecord.company_id == company_id)
                 )
             ) or 0
-            return rec.to_company(listing_count=count)
+            company = rec.to_company(listing_count=count)
+            if not company.industry:
+                derived = await _derive_company_industries(session, {company_id})
+                company.industry = derived.get(company_id) or company.industry
+            return company
 
     async def update_company(self, company_id: int, **fields: object) -> Company | None:
         """Patch non-null enrichment fields on a company; return the updated row."""
@@ -1075,6 +1087,32 @@ def _listing_filter_conds(
     if industry is not None:
         conds.append(JobRecord.industries == industry)
     return conds
+
+
+async def _derive_company_industries(
+    session: AsyncSession, company_ids: set[int]
+) -> dict[int, str]:
+    """Most-common job ``industries`` per company — a sphere derived from listings.
+
+    LinkedIn blocks logged-out company pages (HTTP 999), so a company's own
+    ``industry`` is almost always empty; the job's ``industries`` field is
+    available, so we surface that as the company's working sphere instead.
+    """
+    if not company_ids:
+        return {}
+    pairs = (
+        await session.execute(
+            select(JobRecord.company_id, JobRecord.industries).where(
+                JobRecord.company_id.in_(company_ids),
+                JobRecord.industries.is_not(None),
+            )
+        )
+    ).all()
+    tally: dict[int, Counter[str]] = {}
+    for company_id, industries in pairs:
+        if company_id is not None and industries:
+            tally.setdefault(company_id, Counter())[industries] += 1
+    return {cid: counter.most_common(1)[0][0] for cid, counter in tally.items()}
 
 
 def _to_record(listing: JobListing, *, first_seen_at: datetime) -> JobRecord:

@@ -395,3 +395,21 @@ async def test_industry_grouping_and_filter(storage: Storage) -> None:
     assert len(fin) == 1 and fin[0].listing_count == 1
     titles = await storage.get_position_titles(industry="Software Development")
     assert [t["listing_count"] for t in titles] == [2]  # one title group, 2 SD listings
+
+
+async def test_company_industry_derived_from_listings(storage: Storage) -> None:
+    # LinkedIn blocks company pages, so a company's own industry stays empty;
+    # it is derived from its listings' industries (most common wins).
+    await storage.save_search_results(
+        [
+            _job("1", company="Acme", company_url=_ACME, industries="Software Development"),
+            _job("2", company="Acme", company_url=_ACME, industries="Software Development"),
+            _job("3", company="Acme", company_url=_ACME, industries="IT Services"),
+        ],
+        keyword="x",
+    )
+    (company,) = await storage.get_companies()
+    assert company.industry == "Software Development"
+    assert company.id is not None
+    full = await storage.get_company(company.id)
+    assert full is not None and full.industry == "Software Development"
