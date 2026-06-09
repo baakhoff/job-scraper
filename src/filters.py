@@ -51,6 +51,29 @@ def filter_by_workplace_type(
     return [listing for listing in listings if listing.workplace_type in allowed_set]
 
 
+def tag_workplace_type(
+    listings: Iterable[JobListing], workplace_type: WorkplaceType | None
+) -> list[JobListing]:
+    """Stamp ``workplace_type`` onto listings that don't already have one.
+
+    A search filtered by workplace (LinkedIn ``f_WT``) returns only that type,
+    but the per-card location string rarely says so, so the parsed listing's
+    ``workplace_type`` is usually ``None``. Tagging it here lets the saved data —
+    and the Explore workplace filter — reflect what was actually searched.
+    Listings whose type was already inferred from the location are left as-is;
+    a ``None`` ``workplace_type`` (unfiltered search) changes nothing.
+    """
+    items = list(listings)
+    if workplace_type is None:
+        return items
+    return [
+        item
+        if item.workplace_type is not None
+        else item.model_copy(update={"workplace_type": workplace_type})
+        for item in items
+    ]
+
+
 def dedupe(listings: Iterable[JobListing]) -> list[JobListing]:
     """Remove duplicate listings, keyed by ``job_id`` (preserves first-seen order)."""
     seen: set[str] = set()

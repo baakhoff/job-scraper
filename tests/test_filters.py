@@ -9,6 +9,7 @@ from src.filters import (
     filter_by_keywords,
     filter_by_workplace_type,
     sort_by_posted_desc,
+    tag_workplace_type,
 )
 from src.models import JobListing, WorkplaceType
 
@@ -51,3 +52,13 @@ def test_sort_by_posted_desc_pushes_undated_last() -> None:
         _job("new", posted_at=datetime(2026, 6, 1, tzinfo=UTC)),
     ]
     assert [j.job_id for j in sort_by_posted_desc(jobs)] == ["new", "old", "none"]
+
+
+def test_tag_workplace_type_stamps_only_untagged() -> None:
+    untagged = _job("1")  # no workplace_type
+    hybrid = _job("2", workplace_type=WorkplaceType.HYBRID)
+    tagged = tag_workplace_type([untagged, hybrid], WorkplaceType.REMOTE)
+    assert tagged[0].workplace_type is WorkplaceType.REMOTE  # stamped from the search
+    assert tagged[1].workplace_type is WorkplaceType.HYBRID  # location-inferred type preserved
+    # An unfiltered search (None) changes nothing.
+    assert tag_workplace_type([untagged], None)[0].workplace_type is None

@@ -25,6 +25,7 @@ from src.filters import (
     dedupe,
     filter_by_workplace_type,
     sort_by_posted_desc,
+    tag_workplace_type,
 )
 from src.models import JobListing, SearchParams, WorkplaceType
 from src.parser import parse_detail_html, parse_search_html
@@ -99,6 +100,9 @@ async def _stream_search_events(
         listings = sort_by_posted_desc(dedupe(listings))
         if max_results is not None:
             listings = listings[:max_results]
+        # A workplace-filtered search returns only that type; tag the listings so
+        # the saved data (and the Explore workplace filter) reflect it.
+        listings = tag_workplace_type(listings, params.workplace_type)
         if with_details and listings:
             yield ("log", f"Fetching full details for {len(listings)} listings (slower)…")
             listings = await _enrich_with_details(scraper, listings)

@@ -302,8 +302,8 @@
         <ul>
           <li><strong>Keywords</strong> — job title, skills, or role (e.g. "python developer", "data scientist").</li>
           <li><strong>Location</strong> — city, country, or "Remote". LinkedIn is fuzzy here; leave blank for worldwide.</li>
-          <li><strong>Workplace</strong> — filter to Remote, Hybrid, or On-site only.</li>
-          <li><strong>Language</strong> — hints LinkedIn's locale (sent as Accept-Language) toward postings in that language. A soft hint, not a hard filter — LinkedIn mostly returns the region's language.</li>
+          <li><strong>Workplace</strong> — filter to Remote, Hybrid, or On-site only. The chosen type is saved on each result, so the Explore <em>workplace</em> filter can find them later.</li>
+          <li><strong>Language</strong> — hints LinkedIn's locale (sent as Accept-Language) toward postings in that language. A soft hint, not a hard filter — LinkedIn mostly returns the region's language. (Explore's language filter only matches listings whose language could be detected from their text, so turn on <em>Fetch full details</em> for better coverage.)</li>
           <li><strong>Date posted</strong> — limit to jobs posted in the last 24 h / week / month.</li>
           <li><strong>Max results</strong> — up to 200 (each page is 25 listings, so 200 = 8 pages).</li>
           <li><strong>Fetch full details</strong> — fetches each job's detail page for seniority, employment type, full description, and applicant count. Slower (one extra request per listing) but richer data.</li>
@@ -678,6 +678,12 @@
       return s ? "?" + s : "";
     }
 
+    // True when a server-side (workplace/language) filter is narrowing results —
+    // used to explain an empty result as "nothing matched" vs "no data yet".
+    function exploreFilterActive() {
+      return !!(exploreFilters.workplace || exploreFilters.language);
+    }
+
     function titleQuery(key) {
       const p = new URLSearchParams();
       p.set("title", key);
@@ -760,7 +766,7 @@
         const data = await api("/api/positions" + exploreQuery());
         if (!$("explore-body")) return;               // navigated away mid-fetch
         setStatus(false, `<span class="pill">${data.count} positions</span> you've searched. Click one to see who's hiring.`);
-        if (!data.positions.length) { body.innerHTML = `<div class="empty">No saved positions match. Run a search on the Jobs tab.</div>`; return; }
+        if (!data.positions.length) { body.innerHTML = `<div class="empty">${exploreFilterActive() ? "No saved searches match the workplace/language filter." : "No saved searches yet. Run a search on the Jobs tab."}</div>`; return; }
         const rows = data.positions.map((p) => `
           <tr class="clickable" data-pos="${p.id}" data-label="${esc(p.keyword)}${p.location ? " · " + esc(p.location) : ""}" data-filter="${esc(p.keyword)}" data-loc="${esc(p.location||'')}">
             <td><b>${esc(p.keyword)}</b></td>
@@ -791,7 +797,7 @@
         const data = await api("/api/companies" + exploreQuery());
         if (!$("explore-body")) return;
         setStatus(false, `<span class="pill">${data.count} companies</span> saved. Click one to see the positions it's hiring for.`);
-        if (!data.companies.length) { body.innerHTML = `<div class="empty">No saved companies match. Run a search on the Jobs tab.</div>`; return; }
+        if (!data.companies.length) { body.innerHTML = `<div class="empty">${exploreFilterActive() ? "No saved companies match the workplace/language filter." : "No saved companies yet. Run a search on the Jobs tab."}</div>`; return; }
         const rows = data.companies.map((c) => `
           <tr class="clickable" data-co="${c.id}" data-name="${esc(c.name)}" data-filter="${esc(c.name)}" data-loc="${esc(c.location||'')}">
             <td><b>${esc(c.name)}</b>${c.industry ? `<div style="color:var(--muted);font-size:12px">${esc(c.industry)}</div>` : ""}</td>
@@ -818,7 +824,7 @@
         const data = await api("/api/position-titles" + exploreQuery());
         if (!$("explore-body")) return;
         setStatus(false, `<span class="pill">${data.count} positions</span> found across your saved listings. Click one to see who's hiring.`);
-        if (!data.titles.length) { body.innerHTML = `<div class="empty">No positions yet. Run a search first.</div>`; return; }
+        if (!data.titles.length) { body.innerHTML = `<div class="empty">${exploreFilterActive() ? "No positions match the workplace/language filter." : "No positions yet. Run a search first."}</div>`; return; }
         const rows = data.titles.map((t) => `
           <tr class="clickable" data-title="${esc(t.key)}" data-label="${esc(t.title)}" data-filter="${esc(t.title)}" data-loc="">
             <td><b>${esc(t.title)}</b></td>
