@@ -66,6 +66,9 @@ select = [
 # Typer's documented idiom puts `typer.Option(...)` / `typer.Argument(...)`
 # in parameter defaults; B008 fights that pattern.
 "main.py" = ["B008"]
+# language.py intentionally contains Cyrillic stop words (e.g. 'с') that RUF001
+# flags as look-alikes of Latin letters; the Cyrillic is deliberate.
+"src/language.py" = ["RUF001"]
 
 [tool.ruff.format]
 quote-style = "double"

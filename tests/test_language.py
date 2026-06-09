@@ -15,6 +15,12 @@ def test_detect_language_german() -> None:
     assert detect_language(text) == "de"
 
 
+def test_detect_language_russian() -> None:
+    # Cyrillic must tokenize and match the Russian stop-word set.
+    text = "Мы ищем разработчика на Python для нашей команды и для роста"
+    assert detect_language(text) == "ru"
+
+
 def test_detect_language_none_on_thin_or_empty_text() -> None:
     # Too few stop-word hits → unknown rather than a confident wrong guess.
     assert detect_language("Senior Engineer") is None
@@ -29,6 +35,7 @@ def test_detect_language_combines_multiple_texts() -> None:
 
 def test_accept_language_header() -> None:
     assert accept_language_header("de") == "de,en;q=0.8"
+    assert accept_language_header("ru") == "ru,en;q=0.8"
     assert accept_language_header("en") == "en-US,en;q=0.9"
     # Unknown / empty codes yield no header (scraper falls back to its default).
     assert accept_language_header(None) is None

@@ -26,6 +26,7 @@ LANGUAGE_NAMES: dict[str, str] = {
     "nl": "Dutch",
     "it": "Italian",
     "pt": "Portuguese",
+    "ru": "Russian",
 }
 
 # Distinctive, high-frequency stop words per language. Chosen to minimise
@@ -38,9 +39,12 @@ _STOPWORDS: dict[str, set[str]] = {
     "nl": {"het", "een", "van", "voor", "met", "wij", "zijn", "onze", "naar", "bij", "jij", "ben"},
     "it": {"il", "gli", "per", "con", "una", "nostro", "esperienza", "lavoro", "della", "che"},
     "pt": {"os", "as", "para", "com", "uma", "nosso", "experiência", "trabalho", "como", "você"},
+    "ru": {"и", "в", "не", "на", "что", "с", "по", "для", "как", "мы", "или", "это", "от", "за"},
 }
 
-_WORD_RE = re.compile(r"[a-zA-ZÀ-ÿ]+")
+# Latin (incl. accents) and Cyrillic letters — the latter is required to
+# tokenise Russian at all, otherwise Cyrillic words never match a stop word.
+_WORD_RE = re.compile(r"[a-zA-ZÀ-ÿЀ-ӿ]+")
 
 
 def detect_language(*texts: str | None, min_hits: int = 2) -> str | None:

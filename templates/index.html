@@ -33,9 +33,10 @@
     .dp { grid-column: span 2; } .num { grid-column: span 2; } .det { grid-column: span 4; } .go { grid-column: span 8; }
     .lang { grid-column: span 2; }
     label { font-size: 11px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .4px; }
-    input[type=text], input[type=number], select { padding: 9px 11px; border: 1px solid var(--line);
+    input[type=text], input[type=number], select, textarea { padding: 9px 11px; border: 1px solid var(--line);
       border-radius: 8px; font-size: 14px; background: #fff; color: var(--ink); width: 100%; }
-    input:focus, select:focus { outline: 2px solid var(--brand); border-color: var(--brand); }
+    textarea { font-family: inherit; resize: vertical; line-height: 1.4; }
+    input:focus, select:focus, textarea:focus { outline: 2px solid var(--brand); border-color: var(--brand); }
     .checkbox { display: flex; align-items: center; gap: 8px; font-size: 14px; height: 38px; }
     .checkbox input { width: 16px; height: 16px; }
 
@@ -134,6 +135,7 @@
     <div class="tabs">
       <button class="tab active" data-tab="jobs">Jobs</button>
       <button class="tab" data-tab="companies">Companies</button>
+      <button class="tab" data-tab="batch">Batch</button>
       <button class="tab" data-tab="explore">Explore</button>
     </div>
 
@@ -168,6 +170,7 @@
             <option value="nl">Dutch</option>
             <option value="it">Italian</option>
             <option value="pt">Portuguese</option>
+            <option value="ru">Russian</option>
           </select>
         </div>
         <div class="field dp">
@@ -196,6 +199,49 @@
         </div>
       </form>
       <div class="hint" id="search-hint"></div>
+    </section>
+
+    <!-- batch search card (Batch tab) -->
+    <section class="card" id="batch-card" style="display:none">
+      <form id="batch-form">
+        <div class="field" style="grid-column: span 12">
+          <label for="batch-keywords">Keywords — one per line</label>
+          <textarea id="batch-keywords" rows="4"
+            placeholder="python developer&#10;data scientist&#10;devops engineer"></textarea>
+        </div>
+        <div class="field loc">
+          <label for="batch-location">Location</label>
+          <input id="batch-location" type="text" placeholder="e.g. Berlin, Remote" />
+        </div>
+        <div class="field wt">
+          <label for="batch-wt">Workplace</label>
+          <select id="batch-wt">
+            <option value="">Any</option>
+            <option value="remote">Remote</option>
+            <option value="hybrid">Hybrid</option>
+            <option value="on_site">On-site</option>
+          </select>
+        </div>
+        <div class="field lang">
+          <label for="batch-lang">Language</label>
+          <select id="batch-lang"></select>
+        </div>
+        <div class="field num">
+          <label for="batch-target">Companies / term</label>
+          <input id="batch-target" type="number" value="10" min="1" max="200" />
+        </div>
+        <div class="field det">
+          <label>Detail pages</label>
+          <div class="checkbox"><input id="batch-details" type="checkbox" /><span>Fetch full details (slower)</span></div>
+        </div>
+        <div class="field go">
+          <label>&nbsp;</label>
+          <div class="actions">
+            <button type="submit" class="btn-primary" id="batch-btn">Run batch</button>
+          </div>
+        </div>
+      </form>
+      <div class="hint">Runs each keyword in turn, paging until it has the target number of companies (or LinkedIn runs out). Many terms can take a while — results are saved and show up in Explore.</div>
     </section>
 
     <div class="toolbar">
@@ -237,7 +283,8 @@
         <ul>
           <li><strong>Jobs</strong> — search LinkedIn and save listings. Each search appends new results; duplicates are skipped.</li>
           <li><strong>Companies</strong> — run a search and see which companies are hiring for that role, grouped by employer. Use <em>Show saved</em> to browse without a new scrape.</li>
-          <li><strong>Explore</strong> — browse your saved data without hitting LinkedIn. Toggle <em>By position</em> (click a position → companies hiring + its listings) or <em>By company</em> (click a company → the positions it's hiring for). Filter the view by name/location (instant), or by workplace type and detected language (re-queries the database). Use <em>Search more</em> to fetch fresh results for any saved position.</li>
+          <li><strong>Batch</strong> — search many roles at once: paste keywords (one per line) and set how many companies to collect per term. Each runs in turn and is saved; results show up in Explore.</li>
+          <li><strong>Explore</strong> — browse your saved data without hitting LinkedIn. Three views: <em>By position</em> (real job titles found, seniority merged), <em>By search</em> (the searches you ran), and <em>By company</em>. Click a row to drill into its companies/listings. Filter by name/location (instant), or by workplace type and detected language (re-queries the database).</li>
         </ul>
       </div>
       <div class="section">
@@ -322,10 +369,13 @@
     function switchTab(name) {
       activeTab = name;
       document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("active", t.dataset.tab === name));
-      $("search-card").style.display = name === "explore" ? "none" : "block";
-      $("search-hint").innerHTML = HINTS[name] || "";
+      const searchTab = name === "jobs" || name === "companies";
+      $("search-card").style.display = searchTab ? "block" : "none";
+      $("batch-card").style.display = name === "batch" ? "block" : "none";
+      $("search-hint").innerHTML = searchTab ? (HINTS[name] || "") : "";
       $("search-btn").textContent = name === "companies" ? "Find companies" : "Search";
       if (name === "explore") { exportBar.innerHTML = ""; view.innerHTML = ""; setStatus(false, ""); loadExplore(); return; }
+      if (name === "batch") { exportBar.innerHTML = ""; setStatus(false, ""); renderBatchView(); return; }
       if (renderMemory(name)) return;            // restore a remembered search / result
       exportBar.innerHTML = ""; view.innerHTML = ""; setStatus(false, "");
       if (name === "companies") loadSavedCompanies();
@@ -379,6 +429,50 @@
         memory[tab] = { loading: false, status: `❌ ${esc(err.message)}`, data: null, entity: null };
       }
       if (activeTab === tab) renderMemory(tab);    // only paint if still on that tab
+    }
+
+    // ---------- batch ----------
+    let batchHtml = "";   // remembers the last batch results across tab switches
+
+    function renderBatchView() {
+      view.innerHTML = batchHtml ||
+        `<div class="empty">Enter keywords (one per line) and run a batch search.</div>`;
+    }
+
+    async function runBatch() {
+      const keywords = $("batch-keywords").value.split("\n").map((s) => s.trim()).filter(Boolean);
+      if (!keywords.length) { setStatus(false, "Enter at least one keyword (one per line)."); return; }
+      const body = {
+        keywords,
+        location: $("batch-location").value.trim() || null,
+        workplace_type: $("batch-wt").value || null,
+        language: $("batch-lang").value || null,
+        target_companies: Number($("batch-target").value) || 10,
+        details: $("batch-details").checked,
+      };
+      const btn = $("batch-btn"); btn.disabled = true;
+      setStatus(true, `Running ${keywords.length} search${keywords.length > 1 ? "es" : ""}… this can take a while.`);
+      view.innerHTML = "";
+      try {
+        const data = await api("/api/search/batch", {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+        });
+        const rows = data.results.map((r) => `
+          <tr>
+            <td><b>${esc(r.keywords)}</b></td>
+            <td class="num-cell">${r.companies}</td>
+            <td class="num-cell">${r.new_companies}</td>
+            <td class="num-cell">${r.listings}</td>
+            <td class="num-cell">${r.new_listings}</td>
+          </tr>`).join("");
+        batchHtml = `<table><thead><tr><th>Keyword</th><th>Companies</th><th>New co.</th><th>Listings</th><th>New</th></tr></thead><tbody>${rows}</tbody></table>`;
+        if (activeTab === "batch") {
+          setStatus(false, `<span class="pill">${data.count} searches done</span> · saved. Browse them in Explore.`);
+          renderBatchView();
+        }
+      } catch (err) {
+        if (activeTab === "batch") setStatus(false, `❌ ${esc(err.message)}`);
+      } finally { btn.disabled = false; }
     }
 
     // ---------- jobs ----------
@@ -451,12 +545,12 @@
     }
 
     // ---------- explore ----------
-    let exploreView = "positions";   // "positions" | "companies"
+    let exploreView = "titles";   // "titles" (real positions) | "searches" | "companies"
     // text + location filter client-side (instant); workplace + language hit
     // the backend (they're listing-level) and trigger a refetch.
     const exploreFilters = { text: "", location: "", workplace: "", language: "" };
     const LANG_OPTS = [["", "Any language"], ["en", "English"], ["de", "German"], ["fr", "French"],
-      ["es", "Spanish"], ["nl", "Dutch"], ["it", "Italian"], ["pt", "Portuguese"]];
+      ["es", "Spanish"], ["nl", "Dutch"], ["it", "Italian"], ["pt", "Portuguese"], ["ru", "Russian"]];
 
     function exploreQuery() {
       const p = new URLSearchParams();
@@ -466,12 +560,21 @@
       return s ? "?" + s : "";
     }
 
+    function titleQuery(key) {
+      const p = new URLSearchParams();
+      p.set("title", key);
+      if (exploreFilters.workplace) p.set("workplace_type", exploreFilters.workplace);
+      if (exploreFilters.language) p.set("language", exploreFilters.language);
+      return "?" + p.toString();
+    }
+
     function loadExplore() {
       const langOpts = LANG_OPTS.map(([v, l]) =>
         `<option value="${v}" ${exploreFilters.language === v ? "selected" : ""}>${l}</option>`).join("");
       view.innerHTML = `
         <div class="explore-bar">
-          <button class="btn-ghost btn-sm" id="ex-pos">By position</button>
+          <button class="btn-ghost btn-sm" id="ex-titles" title="Real job titles found, grouped">By position</button>
+          <button class="btn-ghost btn-sm" id="ex-search" title="The searches you have run">By search</button>
           <button class="btn-ghost btn-sm" id="ex-co">By company</button>
           <span class="sep"></span>
           <input id="ex-text" type="text" placeholder="Filter by name…" />
@@ -488,7 +591,8 @@
       $("ex-text").value = exploreFilters.text;
       $("ex-loc").value = exploreFilters.location;
       $("ex-wt").value = exploreFilters.workplace;
-      $("ex-pos").addEventListener("click", () => { exploreView = "positions"; reloadExploreBody(); });
+      $("ex-titles").addEventListener("click", () => { exploreView = "titles"; reloadExploreBody(); });
+      $("ex-search").addEventListener("click", () => { exploreView = "searches"; reloadExploreBody(); });
       $("ex-co").addEventListener("click", () => { exploreView = "companies"; reloadExploreBody(); });
       $("ex-text").addEventListener("input", () => { exploreFilters.text = $("ex-text").value; applyExploreClientFilters(); });
       $("ex-loc").addEventListener("input", () => { exploreFilters.location = $("ex-loc").value; applyExploreClientFilters(); });
@@ -498,10 +602,19 @@
     }
 
     function reloadExploreBody() {
-      $("ex-pos").style.fontWeight = exploreView === "positions" ? "700" : "";
+      $("ex-titles").style.fontWeight = exploreView === "titles" ? "700" : "";
+      $("ex-search").style.fontWeight = exploreView === "searches" ? "700" : "";
       $("ex-co").style.fontWeight = exploreView === "companies" ? "700" : "";
+      // Positions (titles) aggregate across all locations, so a per-row location
+      // filter is meaningless there — disable it rather than silently no-op.
+      const titlesView = exploreView === "titles";
+      $("ex-loc").disabled = titlesView;
+      $("ex-loc").title = titlesView
+        ? "Positions span all locations — switch to By search / By company to filter by location"
+        : "";
       if (exploreView === "companies") loadExploreCompanies();
-      else loadPositions();
+      else if (exploreView === "searches") loadPositions();
+      else loadPositionTitles();
     }
 
     function applyExploreClientFilters() {
@@ -511,8 +624,9 @@
       const l = exploreFilters.location.trim().toLowerCase();
       let shown = 0;
       body.querySelectorAll("tbody tr[data-filter]").forEach((tr) => {
+        const loc = (tr.dataset.loc || "").toLowerCase();
         const ok = (!t || (tr.dataset.filter || "").toLowerCase().includes(t)) &&
-                   (!l || (tr.dataset.loc || "").toLowerCase().includes(l));
+                   (!l || !loc || loc.includes(l));   // rows without a location aren't excluded
         tr.style.display = ok ? "" : "none";
         if (ok) shown++;
       });
@@ -576,6 +690,69 @@
           b.addEventListener("click", (e) => { e.stopPropagation(); openCompany(b.dataset.view); }));
         applyExploreClientFilters();
       } catch (err) { setStatus(false, `❌ ${esc(err.message)}`); }
+    }
+
+    async function loadPositionTitles() {
+      const body = $("explore-body");
+      if (!body) return;
+      setStatus(true, "Loading positions…");
+      try {
+        const data = await api("/api/position-titles" + exploreQuery());
+        if (!$("explore-body")) return;
+        setStatus(false, `<span class="pill">${data.count} positions</span> found across your saved listings. Click one to see who's hiring.`);
+        if (!data.titles.length) { body.innerHTML = `<div class="empty">No positions yet. Run a search first.</div>`; return; }
+        const rows = data.titles.map((t) => `
+          <tr class="clickable" data-title="${esc(t.key)}" data-label="${esc(t.title)}" data-filter="${esc(t.title)}" data-loc="">
+            <td><b>${esc(t.title)}</b></td>
+            <td class="num-cell">${t.company_count}</td>
+            <td class="num-cell">${t.listing_count}</td>
+          </tr>`).join("");
+        body.innerHTML = `<table><thead><tr><th>Position</th><th>Companies</th><th>Listings</th></tr></thead><tbody>${rows}</tbody></table>
+          <div id="ex-empty" class="empty" style="display:none">No rows match your filter.</div>
+          <div id="explore-detail" style="margin-top:18px"></div>`;
+        body.querySelectorAll("[data-title]").forEach((tr) =>
+          tr.addEventListener("click", () => loadTitleDetail(tr.dataset.title, tr.dataset.label)));
+        applyExploreClientFilters();
+      } catch (err) { setStatus(false, `❌ ${esc(err.message)}`); }
+    }
+
+    async function loadTitleDetail(key, label, activeView = "companies") {
+      const target = $("explore-detail");
+      if (!target) return;
+      target.innerHTML = `<div class="status"><span class="spinner"></span><span>Loading…</span></div>`;
+      try {
+        const toggleHtml = `<div style="display:flex;gap:8px;margin-bottom:12px">
+          <button class="btn-ghost btn-sm" id="toggle-co" ${activeView === "companies" ? "style='font-weight:700'" : ""}>Companies</button>
+          <button class="btn-ghost btn-sm" id="toggle-li" ${activeView === "listings" ? "style='font-weight:700'" : ""}>Listings</button>
+        </div>`;
+        if (activeView === "companies") {
+          const data = await api("/api/position-titles/companies" + titleQuery(key));
+          const rows = data.companies.map((c) => `
+            <tr class="clickable" data-company="${c.id}">
+              <td><b>${esc(c.name)}</b></td><td class="num-cell">${c.listing_count}</td>
+              <td>${esc(c.location || "—")}</td>
+              <td><button class="btn-ghost btn-sm" data-view="${c.id}">View</button></td>
+            </tr>`).join("");
+          target.innerHTML = toggleHtml + `<h3 style="font-size:15px;margin:0 0 8px">Companies hiring for "${esc(label)}" (${data.count})</h3>
+            <table><thead><tr><th>Company</th><th>Listings</th><th>Location</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
+          target.querySelectorAll("[data-company]").forEach((tr) =>
+            tr.addEventListener("click", () => openCompany(tr.dataset.company)));
+        } else {
+          const data = await api("/api/position-titles/listings" + titleQuery(key));
+          const rows = data.listings.map((j) => `
+            <tr>
+              <td>${j.url ? `<a class="link" href="${esc(j.url)}" target="_blank" rel="noopener">${esc(j.title)}</a>` : esc(j.title)}</td>
+              <td>${esc(j.company)}</td>
+              <td>${esc(j.location || "—")}</td>
+              <td>${j.language ? esc(j.language.toUpperCase()) : "—"}</td>
+              <td>${j.posted_at ? esc(j.posted_at) : "—"}</td>
+            </tr>`).join("");
+          target.innerHTML = toggleHtml + `<h3 style="font-size:15px;margin:0 0 8px">Listings for "${esc(label)}" (${data.count})</h3>
+            <table><thead><tr><th>Title</th><th>Company</th><th>Location</th><th>Lang</th><th>Posted</th></tr></thead><tbody>${rows || '<tr><td colspan="5" class="empty">No listings stored.</td></tr>'}</tbody></table>`;
+        }
+        $("toggle-co").addEventListener("click", () => loadTitleDetail(key, label, "companies"));
+        $("toggle-li").addEventListener("click", () => loadTitleDetail(key, label, "listings"));
+      } catch (err) { target.innerHTML = `❌ ${esc(err.message)}`; }
     }
 
     async function loadCompanyPositions(companyId, name) {
@@ -747,6 +924,10 @@
     $("help-btn").addEventListener("click", openHelp);
     $("help-close").addEventListener("click", closeHelp);
     helpBg.addEventListener("click", closeHelp);
+
+    // batch tab wiring (LANG_OPTS is defined above, so it's safe to read here)
+    $("batch-lang").innerHTML = LANG_OPTS.map(([v, l]) => `<option value="${v}">${l}</option>`).join("");
+    $("batch-form").addEventListener("submit", (e) => { e.preventDefault(); runBatch(); });
 
     // initial load
     switchTab("jobs");

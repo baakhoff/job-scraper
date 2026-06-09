@@ -27,7 +27,7 @@ from pydantic import BaseModel, Field
 from config import config
 
 # Reuse the exact search pipeline the CLI runs.
-from main import _run_search
+from main import _run_search, _run_search_collecting_companies
 from src.export import rows_to_csv, rows_to_json
 from src.models import Company, CompanyPerson, JobListing, Position, SearchParams, WorkplaceType
 from src.parser import parse_company_html
@@ -57,6 +57,25 @@ class SearchRequest(BaseModel):
     )
     language: str | None = Field(
         None, description="ISO locale hint (e.g. 'de') sent to LinkedIn as Accept-Language."
+    )
+
+
+class BatchSearchRequest(BaseModel):
+    """Body for a batch search: many keywords, a target company count per term."""
+
+    keywords: list[str] = Field(..., min_length=1, description="One search term per entry.")
+    location: str | None = Field(None, description="Optional location filter (all terms).")
+    geo_id: str | None = Field(None, description="LinkedIn geoId (all terms).")
+    workplace_type: WorkplaceType | None = Field(None, description="remote / hybrid / on_site.")
+    posted_within_seconds: int | None = Field(
+        None, description="Only jobs posted within N seconds."
+    )
+    language: str | None = Field(None, description="ISO locale hint (Accept-Language).")
+    details: bool = Field(
+        False, description="Fetch detail pages (off by default — batch is large)."
+    )
+    target_companies: int = Field(
+        10, ge=1, le=200, description="Collect until this many companies per term."
     )
 
 
@@ -197,6 +216,44 @@ async def api_companies_search(req: SearchRequest) -> dict[str, object]:
     }
 
 
+@app.post("/api/search/batch")
+async def api_search_batch(req: BatchSearchRequest) -> dict[str, object]:
+    """Run a search per keyword (paging until ``target_companies`` each) and persist all.
+
+    Sequential and rate-limited per term, so a long keyword list can take a
+    while. Returns a per-keyword summary; the data lands in the Explore views.
+    """
+    terms = [k.strip() for k in req.keywords if k.strip()]
+    results: list[dict[str, object]] = []
+    async with Storage() as storage:
+        for term in terms:
+            params = SearchParams(
+                keywords=term,
+                location=req.location or None,
+                geo_id=req.geo_id or None,
+                workplace_type=req.workplace_type,
+                posted_within_seconds=req.posted_within_seconds,
+                language=req.language or None,
+            )
+            listings = await _run_search_collecting_companies(
+                params, req.target_companies, with_details=req.details
+            )
+            counts = await storage.save_search_results(
+                listings, keyword=term, location=params.location
+            )
+            results.append(
+                {
+                    "keywords": term,
+                    "listings": len(listings),
+                    "companies": len({listing.company.lower() for listing in listings}),
+                    "new_listings": counts["new_listings"],
+                    "new_companies": counts["new_companies"],
+                    "position_id": counts["position_id"],
+                }
+            )
+    return {"count": len(results), "results": results}
+
+
 # --------------------------------------------------------------------------- #
 # Explore (read stored data)                                                  #
 # --------------------------------------------------------------------------- #
@@ -230,6 +287,43 @@ async def api_position_listings(
     async with Storage() as storage:
         listings = await storage.get_listings_for_position(
             position_id, workplace_type=workplace_type, language=language
+        )
+    return {"count": len(listings), "listings": [_job_to_dict(j) for j in listings]}
+
+
+# --------------------------------------------------------------------------- #
+# Explore "By position": saved listings grouped by real (normalized) job title #
+# --------------------------------------------------------------------------- #
+@app.get("/api/position-titles")
+async def api_position_titles(
+    workplace_type: WorkplaceType | None = None, language: str | None = None
+) -> dict[str, object]:
+    """Saved listings grouped by normalized job title (the real positions found)."""
+    async with Storage() as storage:
+        titles = await storage.get_position_titles(workplace_type=workplace_type, language=language)
+    return {"count": len(titles), "titles": titles}
+
+
+@app.get("/api/position-titles/companies")
+async def api_title_companies(
+    title: str, workplace_type: WorkplaceType | None = None, language: str | None = None
+) -> dict[str, object]:
+    """Companies hiring for a normalized-title position group (``title`` = its key)."""
+    async with Storage() as storage:
+        companies = await storage.get_companies_for_title(
+            title, workplace_type=workplace_type, language=language
+        )
+    return {"count": len(companies), "companies": [_company_to_dict(c) for c in companies]}
+
+
+@app.get("/api/position-titles/listings")
+async def api_title_listings(
+    title: str, workplace_type: WorkplaceType | None = None, language: str | None = None
+) -> dict[str, object]:
+    """Listings under a normalized-title position group (``title`` = its key)."""
+    async with Storage() as storage:
+        listings = await storage.get_listings_for_title(
+            title, workplace_type=workplace_type, language=language
         )
     return {"count": len(listings), "listings": [_job_to_dict(j) for j in listings]}
 

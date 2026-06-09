@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import os
 import re
+from collections import Counter
 from collections.abc import Iterable, Sequence
 from datetime import UTC, datetime
 
@@ -265,7 +266,10 @@ class Storage:
         self.url = resolve_database_url(url)
         if self.url.startswith("sqlite") and ":memory:" not in self.url:
             self._ensure_sqlite_parent_dir()
-        self.engine: AsyncEngine = create_async_engine(self.url)
+        # pool_pre_ping validates a pooled connection before use, so a long gap
+        # between queries (e.g. a multi-term batch search that scrapes for
+        # minutes between saves) can't hand back a server-dropped connection.
+        self.engine: AsyncEngine = create_async_engine(self.url, pool_pre_ping=True)
 
     def _ensure_sqlite_parent_dir(self) -> None:
         """Create the parent directory for a SQLite file before the engine opens it."""
@@ -624,6 +628,79 @@ class Storage:
                 )
             positions.sort(key=lambda p: p.listing_count, reverse=True)
             return positions
+
+    async def get_position_titles(
+        self, *, workplace_type: WorkplaceType | None = None, language: str | None = None
+    ) -> list[dict[str, object]]:
+        """Group saved listings by *normalized job title* — the real positions.
+
+        Unlike :meth:`get_positions` (which lists the user's searches), this
+        aggregates listings by ``normalize_position_keyword(title)`` so seniority
+        variants merge. Each group's ``title`` is the most common original title
+        (a real, human name); ``key`` is the normalized handle used for drill-in.
+        """
+        conds = _listing_filter_conds(workplace_type, language)
+        async with self._session() as session:
+            rows: Sequence[JobRecord] = (
+                await session.scalars(select(JobRecord).where(*conds))
+            ).all()
+        titles: dict[str, Counter[str]] = {}
+        companies: dict[str, set[int]] = {}
+        counts: dict[str, int] = {}
+        for row in rows:
+            key = normalize_position_keyword(row.title)
+            if not key:
+                continue
+            titles.setdefault(key, Counter())[row.title] += 1
+            counts[key] = counts.get(key, 0) + 1
+            if row.company_id is not None:
+                companies.setdefault(key, set()).add(row.company_id)
+        ordered = sorted(counts, key=lambda k: counts[k], reverse=True)
+        return [
+            {
+                "key": key,
+                "title": titles[key].most_common(1)[0][0],
+                "listing_count": counts[key],
+                "company_count": len(companies.get(key, set())),
+            }
+            for key in ordered
+        ]
+
+    async def get_companies_for_title(
+        self, key: str, *, workplace_type: WorkplaceType | None = None, language: str | None = None
+    ) -> list[Company]:
+        """Companies hiring for a normalized-title group, by listing count."""
+        conds = _listing_filter_conds(workplace_type, language)
+        async with self._session() as session:
+            rows: Sequence[JobRecord] = (
+                await session.scalars(
+                    select(JobRecord).where(JobRecord.company_id.is_not(None), *conds)
+                )
+            ).all()
+            counts: dict[int, int] = {}
+            for row in rows:
+                if row.company_id is not None and normalize_position_keyword(row.title) == key:
+                    counts[row.company_id] = counts.get(row.company_id, 0) + 1
+            companies: list[Company] = []
+            for company_id, count in counts.items():
+                rec = await session.get(CompanyRecord, company_id)
+                if rec is not None:
+                    companies.append(rec.to_company(listing_count=count))
+            companies.sort(key=lambda c: c.listing_count, reverse=True)
+            return companies
+
+    async def get_listings_for_title(
+        self, key: str, *, workplace_type: WorkplaceType | None = None, language: str | None = None
+    ) -> list[JobListing]:
+        """All listings whose normalized title matches ``key``, newest-first."""
+        conds = _listing_filter_conds(workplace_type, language)
+        async with self._session() as session:
+            rows: Sequence[JobRecord] = (
+                await session.scalars(
+                    select(JobRecord).where(*conds).order_by(JobRecord.posted_at.desc().nullslast())
+                )
+            ).all()
+            return [r.to_listing() for r in rows if normalize_position_keyword(r.title) == key]
 
     async def get_companies(
         self,

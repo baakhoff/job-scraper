@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -54,14 +55,20 @@ console = Console()
 _LAST_CHECK_FILE = Path(config.db_path).with_name(".last_new_check")
 
 
-async def _run_search(
-    params: SearchParams, max_results: int, *, with_details: bool = False
+async def _collect_listings(
+    params: SearchParams,
+    *,
+    max_results: int | None = None,
+    stop: Callable[[list[JobListing]], bool] | None = None,
+    with_details: bool = False,
 ) -> list[JobListing]:
-    """Drive the async scraper/parser pipeline for one search.
+    """Shared scrape core: page, parse, dedupe, optionally enrich.
 
-    When ``with_details`` is set, each listing is enriched with an extra
-    (rate-limited) fetch of its guest detail page — full description, seniority,
-    employment type, job function, industries, applicant count.
+    ``max_results`` caps the scraper's paging and trims the result; ``stop`` is
+    an optional predicate checked after each page (the batch search uses it to
+    stop once enough companies are gathered). Both :func:`_run_search` and
+    :func:`_run_search_collecting_companies` are thin wrappers so the scrape /
+    parse / enrich logic lives in exactly one place.
     """
     rate_limiter = RateLimiter(
         delay_min=config.request_delay_min,
@@ -82,10 +89,43 @@ async def _run_search(
                     listings.append(JobListing.from_raw(raw))
                 except Exception as exc:  # parse/validation failures are operational
                     console.print(f"[yellow]skipped a card:[/yellow] {exc}")
-        listings = sort_by_posted_desc(dedupe(listings))[:max_results]
+            if stop is not None and stop(listings):
+                break
+        listings = sort_by_posted_desc(dedupe(listings))
+        if max_results is not None:
+            listings = listings[:max_results]
         if with_details:
             listings = await _enrich_with_details(scraper, listings)
         return listings
+
+
+async def _run_search(
+    params: SearchParams, max_results: int, *, with_details: bool = False
+) -> list[JobListing]:
+    """Drive the async scraper/parser pipeline for one search.
+
+    When ``with_details`` is set, each listing is enriched with an extra
+    (rate-limited) fetch of its guest detail page — full description, seniority,
+    employment type, job function, industries, applicant count.
+    """
+    return await _collect_listings(params, max_results=max_results, with_details=with_details)
+
+
+async def _run_search_collecting_companies(
+    params: SearchParams, target_companies: int, *, with_details: bool = False
+) -> list[JobListing]:
+    """Page a search until ``target_companies`` distinct companies are gathered.
+
+    Like :func:`_run_search`, but the stop condition is a target *company* count
+    (deduped by lowercased name) rather than a listing count — this backs the
+    batch search. Still bounded by ``config.max_pages`` so a rare role can't loop
+    forever.
+    """
+
+    def enough(listings: list[JobListing]) -> bool:
+        return len({listing.company.lower() for listing in listings}) >= target_companies
+
+    return await _collect_listings(params, stop=enough, with_details=with_details)
 
 
 async def _persist(listings: list[JobListing]) -> tuple[int, str]:

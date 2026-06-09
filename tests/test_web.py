@@ -84,6 +84,44 @@ def test_people_endpoint_enabled_returns_empty_on_auth_wall(
     assert "login" in data["note"].lower() or "leader" in data["note"].lower()
 
 
+def test_position_titles_endpoint(client: TestClient) -> None:
+    data = client.get("/api/position-titles").json()
+    # Seeded titles 'Python Dev' and 'Backend' group by normalized title.
+    assert {t["key"] for t in data["titles"]} == {"python dev", "backend"}
+    companies = client.get("/api/position-titles/companies", params={"title": "python dev"}).json()
+    assert [c["name"] for c in companies["companies"]] == ["Acme"]
+    listings = client.get("/api/position-titles/listings", params={"title": "backend"}).json()
+    assert listings["count"] == 1 and listings["listings"][0]["company"] == "Globex"
+
+
+def test_batch_search_runs_each_keyword(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def fake_collect(
+        params: object, target: int, *, with_details: bool = False
+    ) -> list[JobListing]:
+        kw = params.keywords  # type: ignore[attr-defined]
+        return [
+            JobListing(
+                job_id=f"b-{kw}", title=kw.title(), company=f"{kw.title()} Co",
+                company_url="https://www.linkedin.com/company/x",
+            )
+        ]
+
+    monkeypatch.setattr("web._run_search_collecting_companies", fake_collect)
+    resp = client.post(
+        "/api/search/batch", json={"keywords": ["go dev", "rust dev"], "target_companies": 5}
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["count"] == 2
+    assert {r["keywords"] for r in data["results"]} == {"go dev", "rust dev"}
+    assert all(r["companies"] == 1 and r["new_listings"] == 1 for r in data["results"])
+    # The batch results are persisted as new searches (positions).
+    positions = client.get("/api/positions").json()["positions"]
+    assert any(p["keyword"] == "go dev" for p in positions)
+
+
 def test_export_listings_csv(client: TestClient) -> None:
     res = client.get("/api/export/listings.csv")
     assert res.status_code == 200

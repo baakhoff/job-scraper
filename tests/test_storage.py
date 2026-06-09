@@ -276,6 +276,50 @@ async def test_language_persisted_round_trip(storage: Storage) -> None:
     assert jobs[0].language == "de"
 
 
+async def test_position_titles_group_by_normalized_title(storage: Storage) -> None:
+    await storage.save_search_results(
+        [
+            _job("1", title="Senior Python Developer", company="Acme", company_url=_ACME),
+            _job("2", title="Python Developer", company="Globex", company_url=_GLOBEX),
+            _job("3", title="Data Scientist", company="Acme", company_url=_ACME),
+        ],
+        keyword="mixed search",
+        location=None,
+    )
+    titles = {t["key"]: t for t in await storage.get_position_titles()}
+    # 'Senior Python Developer' + 'Python Developer' merge under 'python developer'.
+    assert titles["python developer"]["listing_count"] == 2
+    assert titles["python developer"]["company_count"] == 2
+    assert titles["data scientist"]["listing_count"] == 1
+    # Display title is one of the real titles seen in the group.
+    assert titles["python developer"]["title"] in {"Senior Python Developer", "Python Developer"}
+
+    # Drill-down by the normalized key.
+    companies = await storage.get_companies_for_title("python developer")
+    assert {c.name for c in companies} == {"Acme", "Globex"}
+    listings = await storage.get_listings_for_title("python developer")
+    assert {j.job_id for j in listings} == {"1", "2"}
+
+
+async def test_position_titles_respects_language_filter(storage: Storage) -> None:
+    await storage.save_search_results(
+        [
+            _job("1", title="Python Developer", company="Acme", company_url=_ACME, language="en"),
+            _job(
+                "2", title="Python Developer", company="Globex",
+                company_url=_GLOBEX, language="de",
+            ),
+        ],
+        keyword="python",
+        location=None,
+    )
+    de = {t["key"]: t for t in await storage.get_position_titles(language="de")}
+    assert de["python developer"]["listing_count"] == 1
+    assert de["python developer"]["company_count"] == 1
+    de_listings = await storage.get_listings_for_title("python developer", language="de")
+    assert [j.job_id for j in de_listings] == ["2"]
+
+
 async def test_explore_filters_by_workplace_and_language(storage: Storage) -> None:
     await storage.save_search_results(
         [
