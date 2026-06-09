@@ -205,7 +205,7 @@ def test_batch_stream_emits_per_keyword_result(
 
 
 def test_refetch_details_stream(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    async def fake_events(
+    async def fake_listings(
         scraper: object, listings: list[JobListing]
     ) -> AsyncIterator[tuple[str, object]]:
         for listing in listings:
@@ -215,18 +215,37 @@ def test_refetch_details_stream(client: TestClient, monkeypatch: pytest.MonkeyPa
                 listing.model_copy(update={"description": "Enriched.", "language": "en"}),
             )
 
-    monkeypatch.setattr("web._refetch_details_events", fake_events)
-    # The seeded listings have no description → both are candidates.
+    async def fake_companies(
+        scraper: object, companies: list[object]
+    ) -> AsyncIterator[tuple[str, object]]:
+        for company in companies:
+            yield ("log", f"company {company.name}")  # type: ignore[attr-defined]
+            # Acme's page returns data; every other company is blocked (no updates).
+            updates = (
+                {"industry": "Software Development"}
+                if company.name == "Acme"  # type: ignore[attr-defined]
+                else {}
+            )
+            yield ("company", (company.id, updates))  # type: ignore[attr-defined]
+
+    monkeypatch.setattr("web._refetch_details_events", fake_listings)
+    monkeypatch.setattr("web._refetch_companies_events", fake_companies)
+    # The seeded listings have no description → both are candidates; both companies
+    # have no profile → both are enrichment candidates.
     resp = client.post("/api/listings/refetch-details", json={"limit": 10})
     assert resp.status_code == 200
     events = [json.loads(line) for line in resp.text.splitlines() if line.strip()]
     result = events[-1]
     assert result["type"] == "result"
     assert result["count"] == 2 and result["enriched"] == 2
-    # They now have descriptions persisted → a second run finds nothing to do.
+    # Both companies were tried; only Acme returned data, the other was "blocked".
+    assert result["companies_count"] == 2 and result["companies_enriched"] == 1
+    # Second run: listings now have descriptions, and Acme now has a persisted
+    # industry → only the still-blocked company remains an enrichment candidate.
     again = client.post("/api/listings/refetch-details", json={"limit": 10})
-    again_events = [json.loads(line) for line in again.text.splitlines() if line.strip()]
-    assert again_events[-1] == {"type": "result", "count": 0, "enriched": 0}
+    again_result = [json.loads(line) for line in again.text.splitlines() if line.strip()][-1]
+    assert again_result["count"] == 0 and again_result["enriched"] == 0
+    assert again_result["companies_count"] == 1 and again_result["companies_enriched"] == 0
 
 
 def test_industries_endpoints(client: TestClient) -> None:

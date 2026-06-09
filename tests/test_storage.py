@@ -413,3 +413,25 @@ async def test_company_industry_derived_from_listings(storage: Storage) -> None:
     assert company.id is not None
     full = await storage.get_company(company.id)
     assert full is not None and full.industry == "Software Development"
+
+
+async def test_get_companies_needing_enrichment(storage: Storage) -> None:
+    await storage.save_search_results(
+        [
+            _job("1", company="Acme", company_url=_ACME),
+            _job("2", company="Globex", company_url=_GLOBEX),
+            _job("3", company="NoSlug Co"),  # no company_url => no slug => not a candidate
+        ],
+        keyword="x",
+    )
+    candidates = await storage.get_companies_needing_enrichment()
+    # NoSlug Co is excluded: there's no handle to build a company-page URL from.
+    assert {c.name for c in candidates} == {"Acme", "Globex"}
+    # limit caps the batch (name-ordered => Acme first).
+    assert [c.name for c in await storage.get_companies_needing_enrichment(limit=1)] == ["Acme"]
+
+    # Persisting any page-only field drops a company from the candidate set.
+    acme = next(c for c in candidates if c.name == "Acme")
+    assert acme.id is not None
+    await storage.update_company(acme.id, website="https://acme.example")
+    assert [c.name for c in await storage.get_companies_needing_enrichment()] == ["Globex"]

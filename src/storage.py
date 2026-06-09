@@ -890,6 +890,35 @@ class Storage:
             ) or 0
             return rec.to_company(listing_count=count)
 
+    async def get_companies_needing_enrichment(
+        self, *, limit: int | None = None
+    ) -> list[Company]:
+        """Companies with a handle but no fetched profile yet — re-fetch candidates.
+
+        A company whose ``industry``/``website``/``company_size``/``description``
+        are *all* empty has never been enriched from its public page (those columns
+        are only ever written by a successful page fetch — the Explore "sphere" is
+        derived at read time and never persisted, so a NULL ``industry`` here still
+        means "page never fetched"). ``slug`` is required to build the page URL.
+        Name-ordered, capped by ``limit``.
+        """
+        stmt = (
+            select(CompanyRecord)
+            .where(
+                CompanyRecord.slug.is_not(None),
+                CompanyRecord.industry.is_(None),
+                CompanyRecord.website.is_(None),
+                CompanyRecord.company_size.is_(None),
+                CompanyRecord.description.is_(None),
+            )
+            .order_by(CompanyRecord.name)
+        )
+        if limit is not None:
+            stmt = stmt.limit(limit)
+        async with self._session() as session:
+            rows: Sequence[CompanyRecord] = (await session.scalars(stmt)).all()
+            return [rec.to_company() for rec in rows]
+
     async def get_listings_for_company(self, company_id: int) -> list[JobListing]:
         """All listings stored for a company, newest-first."""
         async with self._session() as session:

@@ -30,6 +30,7 @@ from config import config
 
 # Reuse the exact search pipeline the CLI runs.
 from main import (
+    _refetch_companies_events,
     _refetch_details_events,
     _run_search,
     _run_search_collecting_companies,
@@ -87,9 +88,11 @@ class BatchSearchRequest(BaseModel):
 
 
 class RefetchRequest(BaseModel):
-    """Body for re-fetching detail pages of already-saved listings."""
+    """Body for re-fetching detail pages of saved listings and company profiles."""
 
-    limit: int = Field(200, ge=1, le=1000, description="Max listings to re-fetch this run.")
+    limit: int = Field(
+        200, ge=1, le=1000, description="Max listings and companies to re-fetch this run."
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -437,35 +440,84 @@ async def api_search_batch_stream(req: BatchSearchRequest) -> StreamingResponse:
 
 @app.post("/api/listings/refetch-details")
 async def api_refetch_details(req: RefetchRequest) -> StreamingResponse:
-    """Re-fetch detail pages for saved listings missing them, streamed as NDJSON.
+    """Re-fetch saved listings' detail pages *and* company profiles, as NDJSON.
 
-    Fills in description / seniority / etc. and re-detects language from the
-    fuller text, so the Explore language filter works on older search-only data.
-    Each listing is saved as it completes, so stopping keeps the ones finished.
+    Two phases over the same scraper (rate-limited, stoppable):
+
+    1. **Listings** missing a description — fills in description / seniority / etc.
+       and re-detects language, so the Explore language + industry filters work on
+       older search-only data. Each listing is saved as it completes.
+    2. **Companies** never enriched — fetches each public company page for its
+       industry / size / website / HQ. LinkedIn usually blocks guest company pages
+       (HTTP 999), so most come back empty; the result reports how many were
+       actually enriched vs. left blocked. (A company's Explore *sphere* is still
+       derived from its listings regardless — this only fills the page-only fields.)
+
+    Stopping mid-run keeps everything saved up to that point.
     """
 
     async def gen() -> AsyncIterator[bytes]:
         try:
             async with Storage() as storage:
                 listings = await storage.get_listings_needing_details(limit=req.limit)
-                if not listings:
+                companies = await storage.get_companies_needing_enrichment(limit=req.limit)
+                if not listings and not companies:
                     yield _ndjson(
-                        {"type": "log", "message": "All saved listings already have details."}
+                        {"type": "log", "message": "All saved listings and companies are enriched."}
                     )
-                    yield _ndjson({"type": "result", "count": 0, "enriched": 0})
+                    yield _ndjson(
+                        {
+                            "type": "result",
+                            "count": 0,
+                            "enriched": 0,
+                            "companies_count": 0,
+                            "companies_enriched": 0,
+                        }
+                    )
                     return
                 count = len(listings)
-                yield _ndjson({"type": "log", "message": f"Re-fetching {count} detail page(s)…"})
+                companies_count = len(companies)
                 enriched = 0
+                companies_enriched = 0
                 async with _build_scraper() as scraper:
-                    async for kind, payload in _refetch_details_events(scraper, listings):
-                        if kind == "log":
-                            yield _ndjson({"type": "log", "message": str(payload)})
-                        elif isinstance(payload, JobListing):
-                            await storage.save_jobs([payload])
-                            if payload.description:
-                                enriched += 1
-                yield _ndjson({"type": "result", "count": count, "enriched": enriched})
+                    if listings:
+                        yield _ndjson(
+                            {"type": "log", "message": f"Re-fetching {count} job detail page(s)…"}
+                        )
+                        async for kind, payload in _refetch_details_events(scraper, listings):
+                            if kind == "log":
+                                yield _ndjson({"type": "log", "message": str(payload)})
+                            elif isinstance(payload, JobListing):
+                                await storage.save_jobs([payload])
+                                if payload.description:
+                                    enriched += 1
+                    if companies:
+                        yield _ndjson(
+                            {
+                                "type": "log",
+                                "message": (
+                                    f"Fetching {companies_count} company profile(s) — "
+                                    "LinkedIn often blocks these, so expect skips…"
+                                ),
+                            }
+                        )
+                        async for kind, payload in _refetch_companies_events(scraper, companies):
+                            if kind == "log":
+                                yield _ndjson({"type": "log", "message": str(payload)})
+                            elif kind == "company" and isinstance(payload, tuple):
+                                company_id, updates = payload
+                                if updates:
+                                    await storage.update_company(company_id, **updates)
+                                    companies_enriched += 1
+                yield _ndjson(
+                    {
+                        "type": "result",
+                        "count": count,
+                        "enriched": enriched,
+                        "companies_count": companies_count,
+                        "companies_enriched": companies_enriched,
+                    }
+                )
         except Exception as exc:  # surface mid-stream failures (not cancellation)
             yield _ndjson({"type": "error", "message": str(exc)})
 

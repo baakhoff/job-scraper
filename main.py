@@ -28,8 +28,8 @@ from src.filters import (
     tag_workplace_type,
 )
 from src.language import detect_language
-from src.models import JobListing, SearchParams, WorkplaceType
-from src.parser import parse_detail_html, parse_search_html
+from src.models import Company, JobListing, SearchParams, WorkplaceType
+from src.parser import parse_company_html, parse_detail_html, parse_search_html
 from src.scraper import LinkedInScraper, RateLimiter
 from src.storage import Storage
 
@@ -250,6 +250,45 @@ async def _refetch_details_events(
         yield ("log", f"[{index}/{total}] {listing.title} @ {listing.company}…")
         html = await scraper.fetch_detail(listing.job_id)
         yield ("listing", _merge_detail(listing, html))
+
+
+# Company-page field -> parse_company_html key. ``location`` is sourced from the
+# parsed ``headquarters`` value.
+_COMPANY_FIELD_KEYS: tuple[tuple[str, str], ...] = (
+    ("industry", "industry"),
+    ("company_size", "company_size"),
+    ("website", "website"),
+    ("description", "description"),
+    ("location", "headquarters"),
+)
+
+
+async def _refetch_companies_events(
+    scraper: LinkedInScraper, companies: list[Company]
+) -> AsyncIterator[tuple[str, object]]:
+    """Fetch each company's public page, yielding progress + parsed field updates.
+
+    Yields ``("log", message)`` before each fetch and ``("company", (id, updates))``
+    after it, where ``updates`` is the non-empty subset of profile fields parsed
+    from the page. It is empty when LinkedIn blocked the guest request (the common
+    case — company pages are usually login-gated), so the caller can count "blocked
+    vs enriched". Rate-limited; a client disconnect cancels the awaiting fetch.
+    """
+    total = len(companies)
+    for index, company in enumerate(companies, start=1):
+        if index > 1:
+            await scraper.rate_limiter.wait()
+        yield ("log", f"[{index}/{total}] {company.name}…")
+        updates: dict[str, object] = {}
+        if company.slug:
+            html = await scraper.fetch_company(company.slug)
+            if html.strip():
+                data = parse_company_html(html)
+                for field, key in _COMPANY_FIELD_KEYS:
+                    value = data.get(key)
+                    if value is not None:
+                        updates[field] = value
+        yield ("company", (company.id, updates))
 
 
 def _render_table(listings: list[JobListing], title: str) -> None:

@@ -258,7 +258,7 @@
       <div id="status" class="status"></div>
       <div class="actions">
         <button class="btn-ghost btn-sm" id="refetch-btn"
-          title="Re-fetch saved listings' detail pages to fill in description, seniority and detected language (slower; stoppable).">⟳ Re-fetch details</button>
+          title="Re-fetch saved listings' detail pages (description, seniority, language) and company profiles (industry, size, website — LinkedIn often blocks these). Slower; stoppable.">⟳ Re-fetch details</button>
         <div class="actions" id="export-bar"></div>
       </div>
     </div>
@@ -624,10 +624,16 @@
         if (!result) throw new Error("No result received from the server.");
         const skipped = result.count - result.enriched;
         const skipNote = skipped > 0
-          ? ` ${skipped} had no detail page (expired or blocked) and were skipped.`
+          ? ` ${skipped} listing(s) had no detail page (expired or blocked) and were skipped.`
           : "";
-        setStatus(false, `<span class="pill">${result.enriched} enriched</span> of ${result.count} listing(s) · details + language updated.`);
-        view.innerHTML = `<div class="empty">Done — enriched ${result.enriched} of ${result.count} listing(s).${skipNote} Explore now reflects the new details (By industry, language filter).</div>`;
+        const co = result.companies_count || 0;
+        const coEnriched = result.companies_enriched || 0;
+        const coBlocked = co - coEnriched;
+        const coNote = co > 0
+          ? ` Company profiles: ${coEnriched} of ${co} enriched${coBlocked > 0 ? `, ${coBlocked} blocked by LinkedIn (guest company pages are login-gated)` : ""}.`
+          : "";
+        setStatus(false, `<span class="pill">${result.enriched} listing(s)</span> + <span class="pill">${coEnriched} company profile(s)</span> enriched.`);
+        view.innerHTML = `<div class="empty">Done — enriched ${result.enriched} of ${result.count} listing(s).${skipNote}${coNote} Companies always show a sphere derived from their listings. Explore now reflects the new details (By industry, language filter).</div>`;
       } catch (err) {
         refetchController = null;
         const stopped = err.name === "AbortError";
