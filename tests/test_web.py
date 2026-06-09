@@ -204,6 +204,31 @@ def test_batch_stream_emits_per_keyword_result(
     assert {r["keywords"] for r in result["results"]} == {"go dev", "rust dev"}
 
 
+def test_refetch_details_stream(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_events(
+        scraper: object, listings: list[JobListing]
+    ) -> AsyncIterator[tuple[str, object]]:
+        for listing in listings:
+            yield ("log", f"fetching {listing.job_id}")
+            yield (
+                "listing",
+                listing.model_copy(update={"description": "Enriched.", "language": "en"}),
+            )
+
+    monkeypatch.setattr("web._refetch_details_events", fake_events)
+    # The seeded listings have no description → both are candidates.
+    resp = client.post("/api/listings/refetch-details", json={"limit": 10})
+    assert resp.status_code == 200
+    events = [json.loads(line) for line in resp.text.splitlines() if line.strip()]
+    result = events[-1]
+    assert result["type"] == "result"
+    assert result["count"] == 2 and result["enriched"] == 2
+    # They now have descriptions persisted → a second run finds nothing to do.
+    again = client.post("/api/listings/refetch-details", json={"limit": 10})
+    again_events = [json.loads(line) for line in again.text.splitlines() if line.strip()]
+    assert again_events[-1] == {"type": "result", "count": 0, "enriched": 0}
+
+
 def test_export_listings_csv(client: TestClient) -> None:
     res = client.get("/api/export/listings.csv")
     assert res.status_code == 200

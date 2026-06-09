@@ -115,6 +115,23 @@ def test_parse_detail_html_applicant_count_parsing() -> None:
     assert parse_detail_html("<p>applicants</p>")["applicant_count"] is None
 
 
+def test_merge_detail_fills_fields_and_redetects_language() -> None:
+    from main import _merge_detail
+    from src.models import JobListing
+
+    base = JobListing(job_id="1", title="Engineer", company="Acme")  # title-only → no language
+    assert base.language is None
+    html = (
+        '<div class="show-more-less-html__markup">We are looking for an engineer '
+        "to join our team and build for our users</div>"
+    )
+    merged = _merge_detail(base, html)
+    assert merged.description is not None
+    assert merged.language == "en"  # detected from the now-available description
+    # An empty/blank detail page leaves the listing unchanged.
+    assert _merge_detail(base, "   ") is base
+
+
 def test_job_id_falls_back_to_link_when_no_urn() -> None:
     html = """
     <li><div class="base-card">

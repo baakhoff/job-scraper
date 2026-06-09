@@ -350,3 +350,16 @@ async def test_explore_filters_by_workplace_and_language(storage: Storage) -> No
     assert pos.id is not None
     listings = await storage.get_listings_for_position(pos.id, language="de")
     assert [j.job_id for j in listings] == ["2"]
+
+
+async def test_get_listings_needing_details(storage: Storage) -> None:
+    await storage.save_jobs(
+        [
+            _job("1", description="Already has a description."),
+            _job("2"),  # description IS NULL → needs a detail re-fetch
+            _job("3"),
+        ]
+    )
+    needing = await storage.get_listings_needing_details()
+    assert {j.job_id for j in needing} == {"2", "3"}
+    assert len(await storage.get_listings_needing_details(limit=1)) == 1

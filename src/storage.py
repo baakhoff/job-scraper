@@ -826,6 +826,24 @@ class Storage:
             rec = await session.get(JobRecord, job_id)
             return rec.to_listing() if rec is not None else None
 
+    async def get_listings_needing_details(self, *, limit: int | None = None) -> list[JobListing]:
+        """Listings with no fetched description — candidates for a detail re-fetch.
+
+        ``description IS NULL`` marks a search-only listing whose detail page was
+        never fetched; re-fetching fills in description, seniority, etc. and lets
+        language be (re-)detected from the fuller text. Newest-first.
+        """
+        stmt = (
+            select(JobRecord)
+            .where(JobRecord.description.is_(None))
+            .order_by(JobRecord.first_seen_at.desc())
+        )
+        if limit is not None:
+            stmt = stmt.limit(limit)
+        async with self._session() as session:
+            rows: Sequence[JobRecord] = (await session.scalars(stmt)).all()
+            return [rec.to_listing() for rec in rows]
+
     async def update_listing(self, job_id: str, **fields: object) -> JobListing | None:
         """Patch non-null enrichment fields on a listing; return the updated row."""
         async with self._session() as session:

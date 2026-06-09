@@ -29,7 +29,12 @@ from pydantic import BaseModel, Field
 from config import config
 
 # Reuse the exact search pipeline the CLI runs.
-from main import _run_search, _run_search_collecting_companies, _stream_search_events
+from main import (
+    _refetch_details_events,
+    _run_search,
+    _run_search_collecting_companies,
+    _stream_search_events,
+)
 from src.export import rows_to_csv, rows_to_json
 from src.models import Company, CompanyPerson, JobListing, Position, SearchParams, WorkplaceType
 from src.parser import parse_company_html
@@ -79,6 +84,12 @@ class BatchSearchRequest(BaseModel):
     target_companies: int = Field(
         10, ge=1, le=200, description="Collect until this many companies per term."
     )
+
+
+class RefetchRequest(BaseModel):
+    """Body for re-fetching detail pages of already-saved listings."""
+
+    limit: int = Field(200, ge=1, le=1000, description="Max listings to re-fetch this run.")
 
 
 # --------------------------------------------------------------------------- #
@@ -418,6 +429,43 @@ async def api_search_batch_stream(req: BatchSearchRequest) -> StreamingResponse:
                         }
                     )
             yield _ndjson({"type": "result", "count": len(results), "results": results})
+        except Exception as exc:  # surface mid-stream failures (not cancellation)
+            yield _ndjson({"type": "error", "message": str(exc)})
+
+    return StreamingResponse(gen(), media_type="application/x-ndjson")
+
+
+@app.post("/api/listings/refetch-details")
+async def api_refetch_details(req: RefetchRequest) -> StreamingResponse:
+    """Re-fetch detail pages for saved listings missing them, streamed as NDJSON.
+
+    Fills in description / seniority / etc. and re-detects language from the
+    fuller text, so the Explore language filter works on older search-only data.
+    Each listing is saved as it completes, so stopping keeps the ones finished.
+    """
+
+    async def gen() -> AsyncIterator[bytes]:
+        try:
+            async with Storage() as storage:
+                listings = await storage.get_listings_needing_details(limit=req.limit)
+                if not listings:
+                    yield _ndjson(
+                        {"type": "log", "message": "All saved listings already have details."}
+                    )
+                    yield _ndjson({"type": "result", "count": 0, "enriched": 0})
+                    return
+                count = len(listings)
+                yield _ndjson({"type": "log", "message": f"Re-fetching {count} detail page(s)…"})
+                enriched = 0
+                async with _build_scraper() as scraper:
+                    async for kind, payload in _refetch_details_events(scraper, listings):
+                        if kind == "log":
+                            yield _ndjson({"type": "log", "message": str(payload)})
+                        elif isinstance(payload, JobListing):
+                            await storage.save_jobs([payload])
+                            if payload.description:
+                                enriched += 1
+                yield _ndjson({"type": "result", "count": count, "enriched": enriched})
         except Exception as exc:  # surface mid-stream failures (not cancellation)
             yield _ndjson({"type": "error", "message": str(exc)})
 

@@ -27,6 +27,7 @@ from src.filters import (
     sort_by_posted_desc,
     tag_workplace_type,
 )
+from src.language import detect_language
 from src.models import JobListing, SearchParams, WorkplaceType
 from src.parser import parse_detail_html, parse_search_html
 from src.scraper import LinkedInScraper, RateLimiter
@@ -193,6 +194,33 @@ def _redact_url(url: str) -> str:
     return f"{scheme}://{creds}@{host}"
 
 
+def _merge_detail(listing: JobListing, html: str) -> JobListing:
+    """Merge a fetched detail page into ``listing``; return it unchanged on failure.
+
+    Re-validates through the model (so detail strings get the same coercion as
+    search fields) and re-detects language from the now-fuller text — the search
+    card only had a title, so a description usually improves detection. A bad
+    detail page is swallowed (the base listing is kept) rather than propagated.
+    """
+    if not html.strip():
+        return listing
+    try:
+        detail = parse_detail_html(html)
+        updates = {k: v for k, v in detail.items() if v is not None}
+        if not updates:
+            return listing
+        merged = {**listing.model_dump(), **updates}
+        language = detect_language(
+            merged.get("title"), merged.get("description_snippet"), merged.get("description")
+        )
+        if language:  # only upgrade — never wipe an existing guess with None
+            merged["language"] = language
+        return JobListing(**merged)
+    except Exception as exc:  # bad detail markup shouldn't drop the base listing
+        console.print(f"[yellow]detail merge skipped for {listing.job_id}:[/yellow] {exc}")
+        return listing
+
+
 async def _enrich_with_details(
     scraper: LinkedInScraper, listings: list[JobListing]
 ) -> list[JobListing]:
@@ -202,22 +230,26 @@ async def _enrich_with_details(
         if index > 0:
             await scraper.rate_limiter.wait()
         html = await scraper.fetch_detail(listing.job_id)
-        if not html.strip():
-            enriched.append(listing)
-            continue
-        try:
-            # Parse + re-validate through the model rather than model_copy so
-            # detail strings (e.g. company_url) get the same coercion as search
-            # fields. Parsing is inside the try so a single malformed detail page
-            # can't abort the whole search — it just keeps the base listing.
-            detail = parse_detail_html(html)
-            updates = {k: v for k, v in detail.items() if v is not None}
-            if updates:
-                listing = JobListing(**{**listing.model_dump(), **updates})
-        except Exception as exc:  # bad detail markup shouldn't drop the base listing
-            console.print(f"[yellow]detail merge skipped for {listing.job_id}:[/yellow] {exc}")
-        enriched.append(listing)
+        enriched.append(_merge_detail(listing, html))
     return enriched
+
+
+async def _refetch_details_events(
+    scraper: LinkedInScraper, listings: list[JobListing]
+) -> AsyncIterator[tuple[str, object]]:
+    """Re-fetch detail pages for stored listings, yielding progress.
+
+    Yields ``("log", message)`` before each fetch and ``("listing", JobListing)``
+    with the (possibly enriched) listing after it, so the caller can persist and
+    report each one. Rate-limited; a client disconnect cancels the awaiting fetch.
+    """
+    total = len(listings)
+    for index, listing in enumerate(listings, start=1):
+        if index > 1:
+            await scraper.rate_limiter.wait()
+        yield ("log", f"[{index}/{total}] {listing.title} @ {listing.company}…")
+        html = await scraper.fetch_detail(listing.job_id)
+        yield ("listing", _merge_detail(listing, html))
 
 
 def _render_table(listings: list[JobListing], title: str) -> None:

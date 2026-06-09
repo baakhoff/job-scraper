@@ -256,7 +256,11 @@
 
     <div class="toolbar">
       <div id="status" class="status"></div>
-      <div class="actions" id="export-bar"></div>
+      <div class="actions">
+        <button class="btn-ghost btn-sm" id="refetch-btn"
+          title="Re-fetch saved listings' detail pages to fill in description, seniority and detected language (slower; stoppable).">⟳ Re-fetch details</button>
+        <div class="actions" id="export-bar"></div>
+      </div>
     </div>
 
     <div id="view"></div>
@@ -319,6 +323,7 @@
           <li><strong>Rate limiting</strong> — LinkedIn blocks rapid requests. Searches include jittered delays (2–5 s per page) and automatic 429 backoff. A large search can take a minute — it streams live progress as it pages, and you can press <em>⏹ Stop</em> any time to cancel.</li>
           <li><strong>People search (Find leaders)</strong> — LinkedIn's public people search is login-gated. The button attempts a best-effort scrape but usually returns no results.</li>
           <li><strong>Company profiles</strong> — opening a company auto-fetches its public profile (industry, size, website, HQ) once, best-effort. Logged-out company pages are sparse and may be blocked, so some fields stay blank.</li>
+          <li><strong>Older listings</strong> — listings saved by a search without details show no description/seniority and an undetected language. Use <em>⟳ Re-fetch details</em> (top toolbar) to fetch their detail pages and fill those in (slower; stoppable).</li>
           <li><strong>Fragile selectors</strong> — LinkedIn changes its HTML markup without notice. If results are empty or fields are missing, selectors in <code>src/parser.py</code> may need updating.</li>
           <li><strong>Public data only</strong> — no private profiles, no messages, no company internal data.</li>
         </ul>
@@ -504,6 +509,7 @@
       const body = searchBody();
       if (!body.keywords) return;
       const tab = activeTab;                       // the tab this search belongs to
+      if (refetchController) { setStatus(false, "A detail re-fetch is running — stop it first."); return; }
       if (memory[tab] && memory[tab].loading) return;   // a search is already running on this tab
       const companies = tab === "companies";
       const controller = new AbortController();
@@ -537,6 +543,14 @@
     let batchHtml = "";          // last batch results, remembered across tab switches
     let batchController = null;  // AbortController while a batch is running (Stop)
     let batchLogs = [];          // live progress lines for the running batch
+    let refetchController = null; // AbortController while a detail re-fetch runs (Stop)
+
+    // Only one streaming operation (search / batch / re-fetch) may run at a time —
+    // they share the #view log panel.
+    function anyStreamRunning() {
+      return !!(refetchController || batchController ||
+        (memory.jobs && memory.jobs.loading) || (memory.companies && memory.companies.loading));
+    }
 
     function renderBatchView() {
       if (batchController) { renderSearchLog(batchLogs, batchController); return; }  // running
@@ -545,7 +559,7 @@
     }
 
     async function runBatch() {
-      if (batchController) return;   // a batch is already running
+      if (refetchController || batchController) return;   // another stream is running
       const keywords = $("batch-keywords").value.split("\n").map((s) => s.trim()).filter(Boolean);
       if (!keywords.length) { setStatus(false, "Enter at least one keyword (one per line)."); return; }
       const body = {
@@ -591,6 +605,33 @@
             : "❌ " + esc(err.message)}</div>`;
         }
       } finally { $("batch-btn").disabled = false; }
+    }
+
+    // ---------- re-fetch details (enrich saved listings) ----------
+    async function runRefetchDetails() {
+      if (anyStreamRunning()) { setStatus(false, "Finish or stop the current operation first."); return; }
+      refetchController = new AbortController();
+      const logs = [];
+      $("refetch-btn").disabled = true;
+      setStatus(true, "Re-fetching details…");
+      renderSearchLog(logs, refetchController);
+      try {
+        const result = await streamRequest("/api/listings/refetch-details", { limit: 500 }, (line) => {
+          logs.push(line);
+          if (!appendLogLine(line)) renderSearchLog(logs, refetchController);
+        }, refetchController.signal);
+        refetchController = null;
+        if (!result) throw new Error("No result received from the server.");
+        setStatus(false, `<span class="pill">${result.enriched} enriched</span> of ${result.count} listing(s) · details + language updated.`);
+        view.innerHTML = `<div class="empty">Done — ${result.enriched} of ${result.count} listing(s) enriched. Open Explore to filter by language.</div>`;
+      } catch (err) {
+        refetchController = null;
+        const stopped = err.name === "AbortError";
+        setStatus(false, stopped ? "⏹ Stopped." : `❌ ${esc(err.message)}`);
+        view.innerHTML = `<div class="empty">${stopped
+          ? "⏹ Stopped. Listings enriched before stopping were saved."
+          : "❌ " + esc(err.message)}</div>`;
+      } finally { $("refetch-btn").disabled = false; }
     }
 
     // ---------- jobs ----------
@@ -1052,6 +1093,7 @@
     // batch tab wiring (LANG_OPTS is defined above, so it's safe to read here)
     $("batch-lang").innerHTML = LANG_OPTS.map(([v, l]) => `<option value="${v}">${l}</option>`).join("");
     $("batch-form").addEventListener("submit", (e) => { e.preventDefault(); runBatch(); });
+    $("refetch-btn").addEventListener("click", runRefetchDetails);
 
     // initial load
     switchTab("jobs");
