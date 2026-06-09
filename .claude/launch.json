@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "ljp-web",
+      "runtimeExecutable": "uv",
+      "runtimeArgs": ["run", "uvicorn", "web:app", "--port", "8011"],
+      "port": 8011
+    }
+  ]
+}
