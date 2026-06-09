@@ -237,3 +237,34 @@ async def test_position_normalization_deduplicates(storage: Storage) -> None:
     assert len(positions) == 1
     # keyword on Position returns display_keyword (the original first-seen search term).
     assert positions[0].keyword == "Senior Python Developer"
+
+
+async def test_get_positions_for_company(storage: Storage) -> None:
+    await storage.save_search_results(
+        [
+            _job("1", company="Acme", company_url=_ACME),
+            _job("2", company="Acme", company_url=_ACME),
+            _job("3", company="Globex", company_url=_GLOBEX),
+        ],
+        keyword="Python",
+        location="Berlin",
+    )
+    await storage.save_search_results(
+        [_job("4", company="Acme", company_url=_ACME)],
+        keyword="Data Scientist",
+        location="Berlin",
+    )
+    acme = next(c for c in await storage.get_companies() if c.name == "Acme")
+    assert acme.id is not None
+
+    positions = await storage.get_positions_for_company(acme.id)
+    # Acme hires for both positions; sorted by this company's listing count desc.
+    assert [(p.keyword, p.listing_count) for p in positions] == [
+        ("Python", 2),
+        ("Data Scientist", 1),
+    ]
+    # company_count is the position's global distinct-company count: Python has
+    # Acme + Globex (2); Data Scientist has only Acme (1).
+    by_kw = {p.keyword: p for p in positions}
+    assert by_kw["Python"].company_count == 2
+    assert by_kw["Data Scientist"].company_count == 1

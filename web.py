@@ -52,7 +52,9 @@ class SearchRequest(BaseModel):
     workplace_type: WorkplaceType | None = Field(None, description="remote / hybrid / on_site.")
     max_results: int = Field(25, ge=1, le=200, description="How many listings to fetch.")
     details: bool = Field(True, description="Fetch each job's detail page (slower).")
-    posted_within_seconds: int | None = Field(None, description="Only jobs posted within N seconds.")
+    posted_within_seconds: int | None = Field(
+        None, description="Only jobs posted within N seconds."
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -238,6 +240,14 @@ async def api_company(company_id: int) -> dict[str, object]:
         "listings": [_job_to_dict(job) for job in listings],
         "people": [_person_to_dict(p) for p in people],
     }
+
+
+@app.get("/api/companies/{company_id}/positions")
+async def api_company_positions(company_id: int) -> dict[str, object]:
+    """Positions a company is hiring for (reverse of /positions/{id}/companies)."""
+    async with Storage() as storage:
+        positions = await storage.get_positions_for_company(company_id)
+    return {"count": len(positions), "positions": [_position_to_dict(p) for p in positions]}
 
 
 @app.get("/api/listings/{job_id}")

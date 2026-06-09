@@ -564,6 +564,44 @@ class Storage:
             companies.sort(key=lambda c: c.listing_count, reverse=True)
             return companies
 
+    async def get_positions_for_company(self, company_id: int) -> list[Position]:
+        """Positions a company is hiring for (derived from its listings), by listing count.
+
+        The reverse of :meth:`get_companies_for_position`. ``listing_count`` is this
+        company's listings under each position; ``company_count`` is the position's
+        global distinct-company count (same meaning as the Explore positions table).
+        """
+        async with self._session() as session:
+            stmt = (
+                select(JobRecord.position_id, func.count().label("cnt"))
+                .where(JobRecord.company_id == company_id, JobRecord.position_id.is_not(None))
+                .group_by(JobRecord.position_id)
+            )
+            pairs = (await session.execute(stmt)).all()
+            positions: list[Position] = []
+            for position_id, count in pairs:
+                rec = await session.get(PositionRecord, position_id)
+                if rec is None:
+                    continue
+                company_count = (
+                    await session.scalar(
+                        select(func.count(func.distinct(JobRecord.company_id))).where(
+                            JobRecord.position_id == position_id
+                        )
+                    )
+                ) or 0
+                positions.append(
+                    Position(
+                        id=rec.id,
+                        keyword=rec.display_keyword,
+                        location=rec.location,
+                        company_count=company_count,
+                        listing_count=count,
+                    )
+                )
+            positions.sort(key=lambda p: p.listing_count, reverse=True)
+            return positions
+
     async def get_companies(
         self, *, keyword: str | None = None, limit: int | None = None
     ) -> list[Company]:

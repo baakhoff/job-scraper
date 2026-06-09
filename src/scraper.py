@@ -137,7 +137,13 @@ class LinkedInScraper:
             try:
                 response = await self._client.get(url, headers=self._headers())
             except httpx.TransportError as exc:
-                log.warning("request_failed", context="page", key=str(params.start), error=str(exc), attempt=attempt)
+                log.warning(
+                    "request_failed",
+                    context="page",
+                    key=str(params.start),
+                    error=str(exc),
+                    attempt=attempt,
+                )
                 await self.rate_limiter.backoff(attempt)
                 continue
 
@@ -251,7 +257,9 @@ class LinkedInScraper:
             try:
                 response = await self._client.get(url, headers=self._headers())
             except httpx.TransportError as exc:
-                log.warning("request_failed", context=context, key=key, error=str(exc), attempt=attempt)
+                log.warning(
+                    "request_failed", context=context, key=key, error=str(exc), attempt=attempt
+                )
                 await self.rate_limiter.backoff(attempt)
                 continue
 
@@ -259,7 +267,9 @@ class LinkedInScraper:
                 await self.rate_limiter.backoff(attempt)
                 continue
             if response.status_code in (400, 404, 999):
-                log.info("endpoint_unavailable", context=context, key=key, status=response.status_code)
+                log.info(
+                    "endpoint_unavailable", context=context, key=key, status=response.status_code
+                )
                 return ""
             response.raise_for_status()
             return response.text

@@ -216,7 +216,7 @@
         <ul>
           <li><strong>Jobs</strong> — search LinkedIn and save listings. Each search appends new results; duplicates are skipped.</li>
           <li><strong>Companies</strong> — run a search and see which companies are hiring for that role, grouped by employer. Use <em>Show saved</em> to browse without a new scrape.</li>
-          <li><strong>Explore</strong> — browse all your saved positions and companies without hitting LinkedIn. Click a position to see who's hiring. Use <em>Search more</em> to fetch fresh results for any saved position.</li>
+          <li><strong>Explore</strong> — browse your saved data without hitting LinkedIn. Toggle <em>By position</em> (click a position → companies hiring + its listings) or <em>By company</em> (click a company → the positions it's hiring for). Use <em>Search more</em> to fetch fresh results for any saved position.</li>
         </ul>
       </div>
       <div class="section">
@@ -275,17 +275,37 @@
     document.querySelectorAll(".tab").forEach((t) =>
       t.addEventListener("click", () => switchTab(t.dataset.tab)));
 
+    // Per-tab view memory: a live search (or saved load) is remembered so it
+    // survives navigating away and back, and a late-resolving fetch never
+    // writes into a tab the user has since left.
+    const memory = { jobs: null, companies: null };
+    // entry shape: { loading: bool, status: <html>, data: <array|null>, entity: <str|null> }
+
+    function renderMemory(name) {
+      const m = memory[name];
+      if (!m) return false;
+      setStatus(m.loading, m.status);
+      if (!m.loading && m.data) {
+        (name === "companies" ? renderCompanies : renderJobs)(m.data);
+        exportBar.innerHTML = "";
+        if (m.entity) exportButtons(m.entity);
+      } else {
+        view.innerHTML = "";
+        exportBar.innerHTML = "";
+      }
+      return true;
+    }
+
     function switchTab(name) {
       activeTab = name;
       document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("active", t.dataset.tab === name));
       $("search-card").style.display = name === "explore" ? "none" : "block";
       $("search-hint").innerHTML = HINTS[name] || "";
       $("search-btn").textContent = name === "companies" ? "Find companies" : "Search";
-      exportBar.innerHTML = "";
-      view.innerHTML = "";
-      setStatus(false, "");
-      if (name === "explore") loadPositions();
-      else if (name === "companies") loadSavedCompanies();
+      if (name === "explore") { exportBar.innerHTML = ""; view.innerHTML = ""; setStatus(false, ""); loadExplore(); return; }
+      if (renderMemory(name)) return;            // restore a remembered search / result
+      exportBar.innerHTML = ""; view.innerHTML = ""; setStatus(false, "");
+      if (name === "companies") loadSavedCompanies();
       else loadSavedJobs();
     }
 
@@ -314,35 +334,45 @@
     async function runSearch() {
       const body = searchBody();
       if (!body.keywords) return;
-      const companies = activeTab === "companies";
-      setStatus(true, companies ? "Searching companies… this can take a moment." : "Searching LinkedIn… this can take a moment.");
-      view.innerHTML = "";
+      const tab = activeTab;                       // the tab this search belongs to
+      const companies = tab === "companies";
+      const busyMsg = companies ? "Searching companies… this can take a moment." : "Searching LinkedIn… this can take a moment.";
+      memory[tab] = { loading: true, status: busyMsg, data: null, entity: null };
+      if (activeTab === tab) renderMemory(tab);
       try {
         const data = await api(companies ? "/api/companies/search" : "/api/search", {
           method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
         });
-        if (companies) {
-          setStatus(false, `<span class="pill">${data.count} companies</span> ${data.new_companies} new · saved.`);
-          renderCompanies(data.companies);
-          exportButtons("companies");
-        } else {
-          setStatus(false, `<span class="pill">${data.count} jobs</span> ${data.new_count} new · ${data.new_companies} new companies · saved.`);
-          renderJobs(data.jobs);
-          exportButtons("listings");
-        }
-      } catch (err) { setStatus(false, `❌ ${esc(err.message)}`); }
+        const status = companies
+          ? `<span class="pill">${data.count} companies</span> ${data.new_companies} new · saved.`
+          : `<span class="pill">${data.count} jobs</span> ${data.new_count} new · ${data.new_companies} new companies · saved.`;
+        memory[tab] = {
+          loading: false, status,
+          data: companies ? data.companies : data.jobs,
+          entity: companies ? "companies" : "listings",
+        };
+      } catch (err) {
+        memory[tab] = { loading: false, status: `❌ ${esc(err.message)}`, data: null, entity: null };
+      }
+      if (activeTab === tab) renderMemory(tab);    // only paint if still on that tab
     }
 
     // ---------- jobs ----------
     async function loadSavedJobs() {
-      setStatus(true, "Loading saved jobs…");
+      const tab = "jobs";
+      memory[tab] = { loading: true, status: "Loading saved jobs…", data: null, entity: null };
+      if (activeTab === tab) renderMemory(tab);
       try {
-        const data = await api("/api/export/listings.json");
-        // listings.json returns a flat array
-        setStatus(false, `<span class="pill">${data.length} saved jobs</span> from your database.`);
-        renderJobs(data);
-        exportButtons("listings");
-      } catch (err) { setStatus(false, `❌ ${esc(err.message)}`); }
+        const data = await api("/api/export/listings.json");   // flat array
+        memory[tab] = {
+          loading: false,
+          status: `<span class="pill">${data.length} saved jobs</span> from your database.`,
+          data, entity: "listings",
+        };
+      } catch (err) {
+        memory[tab] = { loading: false, status: `❌ ${esc(err.message)}`, data: null, entity: null };
+      }
+      if (activeTab === tab) renderMemory(tab);
     }
 
     function renderJobs(jobs) {
@@ -365,13 +395,20 @@
 
     // ---------- companies ----------
     async function loadSavedCompanies() {
-      setStatus(true, "Loading saved companies…");
+      const tab = "companies";
+      memory[tab] = { loading: true, status: "Loading saved companies…", data: null, entity: null };
+      if (activeTab === tab) renderMemory(tab);
       try {
         const data = await api("/api/companies");
-        setStatus(false, `<span class="pill">${data.count} companies</span> from your database.`);
-        renderCompanies(data.companies);
-        exportButtons("companies");
-      } catch (err) { setStatus(false, `❌ ${esc(err.message)}`); }
+        memory[tab] = {
+          loading: false,
+          status: `<span class="pill">${data.count} companies</span> from your database.`,
+          data: data.companies, entity: "companies",
+        };
+      } catch (err) {
+        memory[tab] = { loading: false, status: `❌ ${esc(err.message)}`, data: null, entity: null };
+      }
+      if (activeTab === tab) renderMemory(tab);
     }
 
     function renderCompanies(companies) {
@@ -390,12 +427,29 @@
     }
 
     // ---------- explore ----------
+    let exploreView = "positions";   // "positions" | "companies"
+
+    function loadExplore() {
+      const bar = `<div style="display:flex;gap:8px;margin-bottom:14px">
+        <button class="btn-ghost btn-sm" id="ex-pos" ${exploreView === "positions" ? "style='font-weight:700'" : ""}>By position</button>
+        <button class="btn-ghost btn-sm" id="ex-co" ${exploreView === "companies" ? "style='font-weight:700'" : ""}>By company</button>
+      </div>`;
+      view.innerHTML = bar + `<div id="explore-body"></div>`;
+      $("ex-pos").addEventListener("click", () => { exploreView = "positions"; loadExplore(); });
+      $("ex-co").addEventListener("click", () => { exploreView = "companies"; loadExplore(); });
+      if (exploreView === "companies") loadExploreCompanies();
+      else loadPositions();
+    }
+
     async function loadPositions() {
+      const body = $("explore-body");
+      if (!body) return;                              // navigated away before render
       setStatus(true, "Loading positions…");
       try {
         const data = await api("/api/positions");
+        if (!$("explore-body")) return;               // navigated away mid-fetch
         setStatus(false, `<span class="pill">${data.count} positions</span> you've searched. Click one to see who's hiring.`);
-        if (!data.positions.length) { view.innerHTML = `<div class="empty">No saved positions yet. Run a search on the Jobs tab.</div>`; return; }
+        if (!data.positions.length) { body.innerHTML = `<div class="empty">No saved positions yet. Run a search on the Jobs tab.</div>`; return; }
         const rows = data.positions.map((p) => `
           <tr class="clickable" data-pos="${p.id}" data-label="${esc(p.keyword)}${p.location ? " · " + esc(p.location) : ""}">
             <td><b>${esc(p.keyword)}</b></td>
@@ -404,16 +458,58 @@
             <td class="num-cell">${p.listing_count}</td>
             <td><button class="btn-ghost btn-sm search-more-btn" data-kw="${esc(p.keyword)}" data-loc="${esc(p.location||'')}">Search more</button></td>
           </tr>`).join("");
-        view.innerHTML = `<table><thead><tr><th>Position</th><th>Location</th><th>Companies</th><th>Listings</th><th></th></tr></thead><tbody>${rows}</tbody></table>
-          <div id="explore-companies" style="margin-top:18px"></div>`;
-        view.querySelectorAll("[data-pos]").forEach((tr) =>
+        body.innerHTML = `<table><thead><tr><th>Position</th><th>Location</th><th>Companies</th><th>Listings</th><th></th></tr></thead><tbody>${rows}</tbody></table>
+          <div id="explore-detail" style="margin-top:18px"></div>`;
+        body.querySelectorAll("[data-pos]").forEach((tr) =>
           tr.addEventListener("click", () => loadPositionDetail(tr.dataset.pos, tr.dataset.label)));
-        view.querySelectorAll(".search-more-btn").forEach((btn) =>
+        body.querySelectorAll(".search-more-btn").forEach((btn) =>
           btn.addEventListener("click", (e) => {
             e.stopPropagation();
             searchMoreForPosition(btn.dataset.kw, btn.dataset.loc || null);
           }));
       } catch (err) { setStatus(false, `❌ ${esc(err.message)}`); }
+    }
+
+    async function loadExploreCompanies() {
+      const body = $("explore-body");
+      if (!body) return;
+      setStatus(true, "Loading companies…");
+      try {
+        const data = await api("/api/companies");
+        if (!$("explore-body")) return;
+        setStatus(false, `<span class="pill">${data.count} companies</span> saved. Click one to see the positions it's hiring for.`);
+        if (!data.companies.length) { body.innerHTML = `<div class="empty">No saved companies yet. Run a search on the Jobs tab.</div>`; return; }
+        const rows = data.companies.map((c) => `
+          <tr class="clickable" data-co="${c.id}" data-name="${esc(c.name)}">
+            <td><b>${esc(c.name)}</b>${c.industry ? `<div style="color:var(--muted);font-size:12px">${esc(c.industry)}</div>` : ""}</td>
+            <td class="num-cell">${c.listing_count}</td>
+            <td>${esc(c.location || "—")}</td>
+            <td><button class="btn-ghost btn-sm" data-view="${c.id}">View</button></td>
+          </tr>`).join("");
+        body.innerHTML = `<table><thead><tr><th>Company</th><th>Listings</th><th>Location</th><th></th></tr></thead><tbody>${rows}</tbody></table>
+          <div id="explore-detail" style="margin-top:18px"></div>`;
+        body.querySelectorAll("[data-co]").forEach((tr) =>
+          tr.addEventListener("click", () => loadCompanyPositions(tr.dataset.co, tr.dataset.name)));
+        body.querySelectorAll("[data-view]").forEach((b) =>
+          b.addEventListener("click", (e) => { e.stopPropagation(); openCompany(b.dataset.view); }));
+      } catch (err) { setStatus(false, `❌ ${esc(err.message)}`); }
+    }
+
+    async function loadCompanyPositions(companyId, name) {
+      const target = $("explore-detail");
+      if (!target) return;
+      target.innerHTML = `<div class="status"><span class="spinner"></span><span>Loading…</span></div>`;
+      try {
+        const data = await api(`/api/companies/${companyId}/positions`);
+        const rows = data.positions.map((p) => `
+          <tr>
+            <td><b>${esc(p.keyword)}</b></td>
+            <td>${esc(p.location || "—")}</td>
+            <td class="num-cell">${p.listing_count}</td>
+          </tr>`).join("");
+        target.innerHTML = `<h3 style="font-size:15px;margin:0 0 8px">Positions at "${esc(name)}" (${data.count})</h3>
+          <table><thead><tr><th>Position</th><th>Location</th><th>Listings</th></tr></thead><tbody>${rows || '<tr><td colspan="3" class="empty">No positions stored.</td></tr>'}</tbody></table>`;
+      } catch (err) { target.innerHTML = `❌ ${esc(err.message)}`; }
     }
 
     async function searchMoreForPosition(kw, loc) {
@@ -430,7 +526,8 @@
     }
 
     async function loadPositionDetail(posId, label, activeView = "companies") {
-      const target = $("explore-companies");
+      const target = $("explore-detail");
+      if (!target) return;
       target.innerHTML = `<div class="status"><span class="spinner"></span><span>Loading…</span></div>`;
       try {
         const toggleHtml = `<div style="display:flex;gap:8px;margin-bottom:12px">
