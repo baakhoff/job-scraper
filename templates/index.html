@@ -777,6 +777,7 @@
       $("ex-loc").title = titlesView
         ? "Positions span all locations — switch to By search / By company to filter by location"
         : "";
+      exportBar.innerHTML = "";   // only the By-company view offers a download (set below)
       if (exploreView === "companies") loadExploreCompanies();
       else if (exploreView === "searches") loadPositions();
       else loadPositionTitles();
@@ -837,7 +838,8 @@
       try {
         const data = await api("/api/companies" + exploreQuery());
         if (!$("explore-body")) return;
-        setStatus(false, `<span class="pill">${data.count} companies</span> saved. Click one to see the positions it's hiring for.`);
+        setStatus(false, `<span class="pill">${data.count} companies</span> saved. Click one to see its positions; the ⬇ CSV / JSON buttons download every saved company with its details.`);
+        exportButtons("companies");   // download all companies (+ details), regardless of the filter
         if (!data.companies.length) { body.innerHTML = `<div class="empty">${exploreFilterActive() ? "No saved companies match the workplace/language filter." : "No saved companies yet. Run a search on the Jobs tab."}</div>`; return; }
         const rows = data.companies.map((c) => `
           <tr class="clickable" data-co="${c.id}" data-name="${esc(c.name)}" data-filter="${esc(c.name)}" data-loc="${esc(c.location||'')}">
