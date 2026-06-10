@@ -290,6 +290,58 @@ def test_detailed_search_enriches_companies(
     assert newco["website"] == "https://newco.example" and newco["industry"] == "Tech"
 
 
+def test_refetch_full_includes_already_enriched(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Give one of the two seeded listings a description: normal mode would skip it,
+    # full mode must still re-fetch it.
+    async def seed() -> None:
+        async with Storage() as storage:
+            await storage.save_jobs(
+                [JobListing(job_id="1", title="Python Dev", company="Acme",
+                            description="Already enriched.")]
+            )
+
+    asyncio.run(seed())
+
+    async def fake_listings(
+        scraper: object, listings: list[JobListing]
+    ) -> AsyncIterator[tuple[str, object]]:
+        for listing in listings:
+            yield ("listing", listing.model_copy(update={"description": "Re-fetched."}))
+
+    async def fake_companies(
+        scraper: object, companies: list[object]
+    ) -> AsyncIterator[tuple[str, object]]:
+        for company in companies:
+            yield ("company", (company.id, {}))  # type: ignore[attr-defined]
+
+    monkeypatch.setattr("web._refetch_details_events", fake_listings)
+    monkeypatch.setattr("web._refetch_companies_events", fake_companies)
+
+    normal = client.post("/api/listings/refetch-details", json={"full": False})
+    normal_result = [json.loads(line) for line in normal.text.splitlines() if line.strip()][-1]
+    assert normal_result["count"] == 1  # only job 2 lacks a description
+
+    full = client.post("/api/listings/refetch-details", json={"full": True})
+    full_result = [json.loads(line) for line in full.text.splitlines() if line.strip()][-1]
+    assert full_result["count"] == 2  # both listings, incl. the already-described one
+
+
+def test_purge_requires_confirmation(client: TestClient) -> None:
+    # Without confirm: rejected, nothing deleted.
+    assert client.post("/api/purge", json={"confirm": False}).status_code == 400
+    assert client.get("/api/positions").json()["count"] == 1
+
+    # With confirm: everything is wiped.
+    res = client.post("/api/purge", json={"confirm": True})
+    assert res.status_code == 200
+    body = res.json()
+    assert body["total"] >= 1 and body["deleted"]["companies"] == 2
+    assert client.get("/api/positions").json()["count"] == 0
+    assert client.get("/api/companies").json()["count"] == 0
+
+
 def test_industries_endpoints(client: TestClient) -> None:
     async def seed() -> None:
         async with Storage() as storage:

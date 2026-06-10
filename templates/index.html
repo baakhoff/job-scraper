@@ -258,7 +258,11 @@
       <div id="status" class="status"></div>
       <div class="actions">
         <button class="btn-ghost btn-sm" id="refetch-btn"
-          title="Re-fetch saved listings' detail pages (description, seniority, language) and company profiles (industry, size, website — LinkedIn often blocks these). Slower; stoppable.">⟳ Re-fetch details</button>
+          title="Fill in MISSING data only: listings without a description, companies never enriched (industry, size, website — LinkedIn often blocks these). Slower; stoppable.">⟳ Re-fetch details</button>
+        <button class="btn-ghost btn-sm" id="refetch-all-btn"
+          title="Re-fetch the WHOLE database: every listing's detail page and every company's profile, refreshing existing records (e.g. updated company location). Long — possibly an hour — but stoppable.">⟳⟳ Re-fetch all</button>
+        <button class="btn-ghost btn-sm" id="purge-btn" style="color:#c0392b"
+          title="Delete ALL saved data (listings, companies, searches, people). Asks for confirmation. Cannot be undone.">🗑 Purge</button>
         <div class="actions" id="export-bar"></div>
       </div>
     </div>
@@ -608,15 +612,16 @@
     }
 
     // ---------- re-fetch details (enrich saved listings) ----------
-    async function runRefetchDetails() {
+    async function runRefetchDetails(full = false) {
       if (anyStreamRunning()) { setStatus(false, "Finish or stop the current operation first."); return; }
       refetchController = new AbortController();
       const logs = [];
       $("refetch-btn").disabled = true;
-      setStatus(true, "Re-fetching details…");
+      $("refetch-all-btn").disabled = true;
+      setStatus(true, full ? "Re-fetching the whole database (this can take a while)…" : "Re-fetching details…");
       renderSearchLog(logs, refetchController);
       try {
-        const result = await streamRequest("/api/listings/refetch-details", { limit: 500 }, (line) => {
+        const result = await streamRequest("/api/listings/refetch-details", { limit: 500, full }, (line) => {
           logs.push(line);
           if (!appendLogLine(line)) renderSearchLog(logs, refetchController);
         }, refetchController.signal);
@@ -633,15 +638,56 @@
           ? ` Company profiles: ${coEnriched} of ${co} enriched${coBlocked > 0 ? `, ${coBlocked} blocked by LinkedIn (guest company pages are login-gated)` : ""}.`
           : "";
         setStatus(false, `<span class="pill">${result.enriched} listing(s)</span> + <span class="pill">${coEnriched} company profile(s)</span> enriched.`);
-        view.innerHTML = `<div class="empty">Done — enriched ${result.enriched} of ${result.count} listing(s).${skipNote}${coNote} Companies always show a sphere derived from their listings. Explore now reflects the new details (By industry, language filter).</div>`;
+        view.innerHTML = `<div class="empty">${full ? "Full re-fetch done" : "Done"} — enriched ${result.enriched} of ${result.count} listing(s).${skipNote}${coNote} Companies always show a sphere derived from their listings. Explore now reflects the new details (By industry, language filter).</div>`;
       } catch (err) {
         refetchController = null;
         const stopped = err.name === "AbortError";
         setStatus(false, stopped ? "⏹ Stopped." : `❌ ${esc(err.message)}`);
         view.innerHTML = `<div class="empty">${stopped
-          ? "⏹ Stopped. Listings enriched before stopping were saved."
+          ? "⏹ Stopped. Records re-fetched before stopping were saved."
           : "❌ " + esc(err.message)}</div>`;
-      } finally { $("refetch-btn").disabled = false; }
+      } finally { $("refetch-btn").disabled = false; $("refetch-all-btn").disabled = false; }
+    }
+
+    // ---------- purge (wipe the database, with confirmation) ----------
+    async function runPurge() {
+      if (anyStreamRunning()) { setStatus(false, "Finish or stop the current operation first."); return; }
+      setStatus(false, "⚠ Confirm database purge.");
+      view.innerHTML = `<div class="empty" style="max-width:520px;margin:24px auto;text-align:center">
+        <div style="font-size:32px">🗑</div>
+        <h3 style="margin:8px 0;color:#c0392b">Purge the entire database?</h3>
+        <p style="color:var(--muted)">This permanently deletes <b>all</b> saved listings, companies, searches, and people. This cannot be undone.</p>
+        <div style="margin-top:14px;display:flex;gap:10px;justify-content:center">
+          <button class="btn-ghost btn-sm" id="purge-cancel">Cancel</button>
+          <button class="btn-sm" id="purge-confirm" style="background:#c0392b;color:#fff;border-color:#c0392b">Yes, delete everything</button>
+        </div></div>`;
+      $("purge-cancel").addEventListener("click", () => {
+        setStatus(false, "Purge cancelled.");
+        activeTab === "companies" ? loadSavedCompanies() : loadSavedJobs();
+      });
+      $("purge-confirm").addEventListener("click", async () => {
+        $("purge-confirm").disabled = true;
+        $("purge-cancel").disabled = true;
+        setStatus(true, "Purging…");
+        try {
+          const res = await api("/api/purge", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ confirm: true }),
+          });
+          const d = res.deleted || {};
+          // Reset everything: cached tabs, auto-enrich memory, filters.
+          Object.keys(memory).forEach((k) => delete memory[k]);
+          autoEnriched.clear();
+          savedFilters.jobs.industry = ""; savedFilters.companies.industry = "";
+          setStatus(false, `<span class="pill">Database purged</span> — removed ${res.total} record(s).`);
+          view.innerHTML = `<div class="empty">Database purged — deleted ${d.listings || 0} listing(s), ${d.companies || 0} company(ies), ${d.positions || 0} search(es), ${d.people || 0} person(s). Run a search on the Jobs tab to start again.</div>`;
+          exportBar.innerHTML = "";
+        } catch (err) {
+          setStatus(false, `❌ ${esc(err.message)}`);
+          view.innerHTML = `<div class="empty">❌ Purge failed: ${esc(err.message)}</div>`;
+        }
+      });
     }
 
     // ---------- jobs ----------
@@ -1225,7 +1271,9 @@
     // batch tab wiring (LANG_OPTS is defined above, so it's safe to read here)
     $("batch-lang").innerHTML = LANG_OPTS.map(([v, l]) => `<option value="${v}">${l}</option>`).join("");
     $("batch-form").addEventListener("submit", (e) => { e.preventDefault(); runBatch(); });
-    $("refetch-btn").addEventListener("click", runRefetchDetails);
+    $("refetch-btn").addEventListener("click", () => runRefetchDetails(false));
+    $("refetch-all-btn").addEventListener("click", () => runRefetchDetails(true));
+    $("purge-btn").addEventListener("click", runPurge);
 
     // initial load
     switchTab("jobs");

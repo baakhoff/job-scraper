@@ -93,6 +93,17 @@ class RefetchRequest(BaseModel):
     limit: int = Field(
         200, ge=1, le=1000, description="Max listings and companies to re-fetch this run."
     )
+    full: bool = Field(
+        False,
+        description="Re-fetch the whole database (every listing + company), not just"
+        " the ones missing data. Refreshes existing records; ignores 'limit'. Slow.",
+    )
+
+
+class PurgeRequest(BaseModel):
+    """Body for wiping the database; ``confirm`` must be true (a safety latch)."""
+
+    confirm: bool = Field(False, description="Must be true to actually delete anything.")
 
 
 # --------------------------------------------------------------------------- #
@@ -492,14 +503,23 @@ async def api_refetch_details(req: RefetchRequest) -> StreamingResponse:
        actually enriched vs. left blocked. (A company's Explore *sphere* is still
        derived from its listings regardless — this only fills the page-only fields.)
 
+    With ``full`` set, re-fetches the *entire* database — every listing and every
+    company with a handle, refreshing records that already have data (e.g. updated
+    company HQ / placement) — instead of only the ones missing it. Slow but
+    thorough; still rate-limited and stoppable.
+
     Stopping mid-run keeps everything saved up to that point.
     """
 
     async def gen() -> AsyncIterator[bytes]:
         try:
             async with Storage() as storage:
-                listings = await storage.get_listings_needing_details(limit=req.limit)
-                companies = await storage.get_companies_needing_enrichment(limit=req.limit)
+                if req.full:
+                    listings = await storage.get_jobs(limit=None)
+                    companies = [c for c in await storage.get_companies() if c.slug]
+                else:
+                    listings = await storage.get_listings_needing_details(limit=req.limit)
+                    companies = await storage.get_companies_needing_enrichment(limit=req.limit)
                 if not listings and not companies:
                     yield _ndjson(
                         {"type": "log", "message": "All saved listings and companies are enriched."}
@@ -561,6 +581,20 @@ async def api_refetch_details(req: RefetchRequest) -> StreamingResponse:
             yield _ndjson({"type": "error", "message": str(exc)})
 
     return StreamingResponse(gen(), media_type="application/x-ndjson")
+
+
+@app.post("/api/purge")
+async def api_purge(req: PurgeRequest) -> dict[str, object]:
+    """Wipe every saved row. Destructive and irreversible.
+
+    Guarded by ``confirm`` so a stray request can't empty the database — the UI
+    sends it only after the user confirms. Returns the per-table delete counts.
+    """
+    if not req.confirm:
+        raise HTTPException(status_code=400, detail="Purge not confirmed.")
+    async with Storage() as storage:
+        deleted = await storage.purge()
+    return {"deleted": deleted, "total": sum(deleted.values())}
 
 
 # --------------------------------------------------------------------------- #

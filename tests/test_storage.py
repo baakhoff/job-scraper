@@ -453,3 +453,25 @@ async def test_company_language_derived_from_listings(storage: Storage) -> None:
     assert company.id is not None
     full = await storage.get_company(company.id)
     assert full is not None and full.language == "ru"
+
+
+async def test_purge_deletes_everything(storage: Storage) -> None:
+    from src.models import CompanyPerson
+
+    await storage.save_search_results(
+        [
+            _job("1", company="Acme", company_url=_ACME),
+            _job("2", company="Globex", company_url=_GLOBEX),
+        ],
+        keyword="x",
+    )
+    companies = await storage.get_companies()
+    assert companies[0].id is not None
+    await storage.upsert_company_people(companies[0].id, [CompanyPerson(name="Jane Doe")])
+
+    counts = await storage.purge()
+    assert counts == {"listings": 2, "companies": 2, "positions": 1, "people": 1}
+    # Everything is gone; the schema still works (queries return empty, no error).
+    assert await storage.get_jobs() == []
+    assert await storage.get_companies() == []
+    assert await storage.get_positions() == []

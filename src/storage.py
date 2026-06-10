@@ -35,6 +35,7 @@ from sqlalchemy import (
     Integer,
     String,
     UniqueConstraint,
+    delete,
     func,
     select,
     text,
@@ -895,6 +896,32 @@ class Storage:
                 )
             ) or 0
             return rec.to_company(listing_count=count)
+
+    async def purge(self) -> dict[str, int]:
+        """Delete every stored row (listings, companies, positions, people).
+
+        Irreversible — the schema is kept, the data is wiped. Children are deleted
+        before parents so the listing→company/position and people→company foreign
+        keys never dangle. Returns the per-table counts that were removed.
+        """
+        tables = {
+            "listings": JobRecord,
+            "companies": CompanyRecord,
+            "positions": PositionRecord,
+            "people": CompanyPersonRecord,
+        }
+        async with self._session() as session:
+            counts = {
+                name: (await session.scalar(select(func.count()).select_from(rec))) or 0
+                for name, rec in tables.items()
+            }
+            # Children first (FKs): listings + people reference companies/positions.
+            await session.execute(delete(JobRecord))
+            await session.execute(delete(CompanyPersonRecord))
+            await session.execute(delete(CompanyRecord))
+            await session.execute(delete(PositionRecord))
+            await session.commit()
+            return counts
 
     async def get_companies_needing_enrichment(
         self, *, limit: int | None = None
