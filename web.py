@@ -131,6 +131,7 @@ def _company_to_dict(company: Company) -> dict[str, object]:
         "company_size": company.company_size,
         "website": company.website,
         "description": company.description,
+        "language": company.language,
         "listing_count": company.listing_count,
     }
 
@@ -294,13 +295,47 @@ def _stream_params(req: SearchRequest) -> SearchParams:
 _Finalize = Callable[["Storage", SearchParams, "list[JobListing]"], Awaitable[dict[str, object]]]
 
 
+async def _stream_company_enrichment(storage: Storage, position_id: int) -> AsyncIterator[bytes]:
+    """Fetch profiles for a search's un-enriched companies, streaming NDJSON logs.
+
+    Used by detailed searches so "Fetch full details" also fills in the companies
+    it just discovered (industry / size / website / HQ). Only companies with a
+    handle and no profile yet are tried; LinkedIn often blocks guest company pages
+    (HTTP 999), so this commonly logs skips — the company's sphere and language are
+    derived from its listings regardless.
+    """
+    companies = await storage.get_companies_for_position(position_id)
+    todo = [
+        c
+        for c in companies
+        if c.slug and not (c.industry or c.website or c.company_size or c.description)
+    ]
+    if not todo:
+        return
+    yield _ndjson(
+        {
+            "type": "log",
+            "message": f"Fetching profiles for {len(todo)} company(ies) — LinkedIn often blocks…",
+        }
+    )
+    async with _build_scraper() as scraper:
+        async for kind, payload in _refetch_companies_events(scraper, todo):
+            if kind == "log":
+                yield _ndjson({"type": "log", "message": str(payload)})
+            elif kind == "company" and isinstance(payload, tuple):
+                company_id, updates = payload
+                if updates:
+                    await storage.update_company(company_id, **updates)
+
+
 def _stream_to_result(req: SearchRequest, opening: str, finalize: _Finalize) -> StreamingResponse:
     """Shared NDJSON streamer for a single search: logs, then save+result.
 
     Forwards per-page progress, then calls ``finalize`` to persist and produce
-    the ``result`` event. Any mid-stream failure is surfaced as an ``error``
-    event rather than a silently truncated stream. (``except Exception`` does
-    not catch ``CancelledError``, so a client-stop still tears the scrape down.)
+    the ``result`` event. When the search requested full details, the companies
+    it found are enriched too (streamed). Any mid-stream failure is surfaced as an
+    ``error`` event rather than a silently truncated stream. (``except Exception``
+    does not catch ``CancelledError``, so a client-stop still tears the scrape down.)
     """
     params = _stream_params(req)
 
@@ -318,6 +353,10 @@ def _stream_to_result(req: SearchRequest, opening: str, finalize: _Finalize) -> 
             yield _ndjson({"type": "log", "message": "Saving results…"})
             async with Storage() as storage:
                 event = await finalize(storage, params, listings)
+                position_id = event.get("position_id")
+                if req.details and isinstance(position_id, int):
+                    async for line in _stream_company_enrichment(storage, position_id):
+                        yield line
             yield _ndjson(event)
         except Exception as exc:  # surface mid-stream failures (not cancellation)
             yield _ndjson({"type": "error", "message": str(exc)})
@@ -776,11 +815,11 @@ async def api_company_people(
 _EXPORT_FIELDS: dict[str, list[str]] = {
     "listings": [
         "job_id", "title", "company", "location", "workplace_type", "language", "url",
-        "posted_at", "seniority", "employment_type", "applicant_count",
+        "posted_at", "seniority", "employment_type", "industries", "applicant_count",
         "company_url", "description_snippet",
     ],
     "companies": [
-        "id", "name", "slug", "company_url", "location", "industry",
+        "id", "name", "slug", "company_url", "location", "industry", "language",
         "company_size", "website", "listing_count", "description",
     ],
     "people": ["id", "company_id", "name", "headline", "profile_url", "keyword", "source"],

@@ -842,14 +842,18 @@ class Storage:
                 companies.append(rec.to_company(listing_count=cnt))
                 if filtered and limit is not None and len(companies) >= limit:
                     break
-            # Fill in each company's sphere from its listings where the (blocked)
-            # company-page enrichment left it empty.
+            # Fill in each company's sphere + language from its listings (the
+            # company page itself is usually blocked, so these are derived).
+            company_ids = {c.id for c in companies if c.id is not None}
             derived = await _derive_company_industries(
                 session, {c.id for c in companies if not c.industry and c.id is not None}
             )
+            languages = await _derive_company_languages(session, company_ids)
             for company in companies:
                 if not company.industry and company.id in derived:
                     company.industry = derived[company.id]
+                if company.id in languages:
+                    company.language = languages[company.id]
             return companies
 
     async def get_company(self, company_id: int) -> Company | None:
@@ -869,6 +873,8 @@ class Storage:
             if not company.industry:
                 derived = await _derive_company_industries(session, {company_id})
                 company.industry = derived.get(company_id) or company.industry
+            languages = await _derive_company_languages(session, {company_id})
+            company.language = languages.get(company_id) or company.language
             return company
 
     async def update_company(self, company_id: int, **fields: object) -> Company | None:
@@ -1141,6 +1147,34 @@ async def _derive_company_industries(
     for company_id, industries in pairs:
         if company_id is not None and industries:
             tally.setdefault(company_id, Counter())[industries] += 1
+    return {cid: counter.most_common(1)[0][0] for cid, counter in tally.items()}
+
+
+async def _derive_company_languages(
+    session: AsyncSession, company_ids: set[int]
+) -> dict[int, str]:
+    """Most-common detected ``language`` across each company's listings.
+
+    A company's own public page (its description) is usually blocked (HTTP 999),
+    so we infer the company's language from the listings it publishes — a Russian
+    employer posts Russian job descriptions, which ``detect_language`` tags ``ru``.
+    Per-listing language is only reliable once detail pages are fetched (a short
+    title carries little signal), so this fills in as listings gain descriptions.
+    """
+    if not company_ids:
+        return {}
+    pairs = (
+        await session.execute(
+            select(JobRecord.company_id, JobRecord.language).where(
+                JobRecord.company_id.in_(company_ids),
+                JobRecord.language.is_not(None),
+            )
+        )
+    ).all()
+    tally: dict[int, Counter[str]] = {}
+    for company_id, language in pairs:
+        if company_id is not None and language:
+            tally.setdefault(company_id, Counter())[language] += 1
     return {cid: counter.most_common(1)[0][0] for cid, counter in tally.items()}
 
 

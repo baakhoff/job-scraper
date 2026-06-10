@@ -248,6 +248,48 @@ def test_refetch_details_stream(client: TestClient, monkeypatch: pytest.MonkeyPa
     assert again_result["companies_count"] == 1 and again_result["companies_enriched"] == 0
 
 
+def test_detailed_search_enriches_companies(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def fake_events(
+        params: object, *, max_results: int | None = None,
+        stop: object = None, with_details: bool = False,
+    ) -> AsyncIterator[tuple[str, object]]:
+        yield ("log", "Page 1…")
+        yield (
+            "listings",
+            [
+                JobListing(
+                    job_id="d1", title="Dev", company="NewCo",
+                    company_url="https://www.linkedin.com/company/newco",
+                )
+            ],
+        )
+
+    async def fake_companies(
+        scraper: object, companies: list[object]
+    ) -> AsyncIterator[tuple[str, object]]:
+        for company in companies:
+            yield ("log", f"profile {company.name}")  # type: ignore[attr-defined]
+            updates = {"website": "https://newco.example", "industry": "Tech"}
+            yield ("company", (company.id, updates))  # type: ignore[attr-defined]
+
+    monkeypatch.setattr("web._stream_search_events", fake_events)
+    monkeypatch.setattr("web._refetch_companies_events", fake_companies)
+    # details=True => after saving, the search's companies are enriched too.
+    resp = client.post("/api/search/stream", json={"keywords": "dev", "details": True})
+    assert resp.status_code == 200
+    events = [json.loads(line) for line in resp.text.splitlines() if line.strip()]
+    assert events[-1]["type"] == "result"
+    # The company-enrichment phase ran and was streamed.
+    logs = [e["message"] for e in events if e["type"] == "log"]
+    assert any("profile NewCo" in m for m in logs)
+    # NewCo's profile fields were persisted.
+    companies = client.get("/api/companies").json()["companies"]
+    newco = next(c for c in companies if c["name"] == "NewCo")
+    assert newco["website"] == "https://newco.example" and newco["industry"] == "Tech"
+
+
 def test_industries_endpoints(client: TestClient) -> None:
     async def seed() -> None:
         async with Storage() as storage:

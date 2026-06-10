@@ -435,3 +435,21 @@ async def test_get_companies_needing_enrichment(storage: Storage) -> None:
     assert acme.id is not None
     await storage.update_company(acme.id, website="https://acme.example")
     assert [c.name for c in await storage.get_companies_needing_enrichment()] == ["Globex"]
+
+
+async def test_company_language_derived_from_listings(storage: Storage) -> None:
+    # A company's page is usually blocked, so its language is inferred from the
+    # dominant detected language of the listings it publishes.
+    await storage.save_search_results(
+        [
+            _job("1", company="Acme", company_url=_ACME, language="ru"),
+            _job("2", company="Acme", company_url=_ACME, language="ru"),
+            _job("3", company="Acme", company_url=_ACME, language="en"),
+        ],
+        keyword="x",
+    )
+    (company,) = await storage.get_companies()
+    assert company.language == "ru"  # most common among Acme's listings
+    assert company.id is not None
+    full = await storage.get_company(company.id)
+    assert full is not None and full.language == "ru"

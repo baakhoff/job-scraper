@@ -105,8 +105,16 @@ async def _stream_search_events(
         # the saved data (and the Explore workplace filter) reflect it.
         listings = tag_workplace_type(listings, params.workplace_type)
         if with_details and listings:
-            yield ("log", f"Fetching full details for {len(listings)} listings (slower)…")
-            listings = await _enrich_with_details(scraper, listings)
+            yield ("log", f"Fetching full details for {len(listings)} listing(s) (slower)…")
+            # Stream per-listing progress (the same generator the re-fetch action
+            # uses) so a long detail pass shows movement instead of looking hung.
+            enriched: list[JobListing] = []
+            async for kind, payload in _refetch_details_events(scraper, listings):
+                if kind == "log":
+                    yield (kind, payload)
+                elif isinstance(payload, JobListing):
+                    enriched.append(payload)
+            listings = enriched
         yield ("listings", listings)
 
 
@@ -219,19 +227,6 @@ def _merge_detail(listing: JobListing, html: str) -> JobListing:
     except Exception as exc:  # bad detail markup shouldn't drop the base listing
         console.print(f"[yellow]detail merge skipped for {listing.job_id}:[/yellow] {exc}")
         return listing
-
-
-async def _enrich_with_details(
-    scraper: LinkedInScraper, listings: list[JobListing]
-) -> list[JobListing]:
-    """Fetch each listing's detail page and merge in non-empty extra fields."""
-    enriched: list[JobListing] = []
-    for index, listing in enumerate(listings):
-        if index > 0:
-            await scraper.rate_limiter.wait()
-        html = await scraper.fetch_detail(listing.job_id)
-        enriched.append(_merge_detail(listing, html))
-    return enriched
 
 
 async def _refetch_details_events(

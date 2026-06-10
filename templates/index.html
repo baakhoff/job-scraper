@@ -307,10 +307,10 @@
           <li><strong>Keywords</strong> — job title, skills, or role (e.g. "python developer", "data scientist").</li>
           <li><strong>Location</strong> — city, country, or "Remote". LinkedIn is fuzzy here; leave blank for worldwide.</li>
           <li><strong>Workplace</strong> — filter to Remote, Hybrid, or On-site only. The chosen type is saved on each result, so the Explore <em>workplace</em> filter can find them later.</li>
-          <li><strong>Language</strong> — hints LinkedIn's locale (sent as Accept-Language) toward postings in that language. A soft hint, not a hard filter — LinkedIn mostly returns the region's language. (Explore's language filter only matches listings whose language could be detected from their text, so turn on <em>Fetch full details</em> for better coverage.)</li>
+          <li><strong>Language</strong> — hints LinkedIn's locale (sent as Accept-Language) toward postings in that language. A soft hint, not a hard filter — LinkedIn mostly returns the region's language. The language shown on a listing is <em>detected from its text</em>, not from this choice: a short title carries little signal (so search-only listings often read as English or blank), but a full description detects reliably — turn on <em>Fetch full details</em>. A company's language is the dominant language of the listings it publishes.</li>
           <li><strong>Date posted</strong> — limit to jobs posted in the last 24 h / week / month.</li>
           <li><strong>Max results</strong> — up to 200 (each page is 25 listings, so 200 = 8 pages).</li>
-          <li><strong>Fetch full details</strong> — fetches each job's detail page for seniority, employment type, full description, and applicant count. Slower (one extra request per listing) but richer data.</li>
+          <li><strong>Fetch full details</strong> — fetches each job's detail page for seniority, employment type, full description, applicant count, and industry, then fetches the public profile of each company it found (industry, size, website, HQ). Slower (an extra request per listing and per company) but much richer data, and it makes language detection reliable. Progress streams live; press <em>⏹ Stop</em> to cut it short.</li>
         </ul>
       </div>
       <div class="section">
@@ -322,7 +322,7 @@
         <ul>
           <li><strong>Rate limiting</strong> — LinkedIn blocks rapid requests. Searches include jittered delays (2–5 s per page) and automatic 429 backoff. A large search can take a minute — it streams live progress as it pages, and you can press <em>⏹ Stop</em> any time to cancel.</li>
           <li><strong>People search (Find leaders)</strong> — LinkedIn's public people search is login-gated. The button attempts a best-effort scrape but usually returns no results.</li>
-          <li><strong>Company profiles</strong> — opening a company auto-fetches its public profile (industry, size, website, HQ) once, best-effort. Logged-out company pages are sparse and may be blocked, so some fields stay blank.</li>
+          <li><strong>Company profiles</strong> — <em>Fetch full details</em> (on search) and <em>⟳ Re-fetch details</em> (toolbar) fetch each company's public profile (industry, size, website, HQ); opening a company also fetches it once. Best-effort: logged-out company pages are often blocked (HTTP 999), so some fields stay blank. A company's working sphere and language are derived from its listings, so they show even when the page is blocked.</li>
           <li><strong>Older listings</strong> — listings saved by a search without details show no description/seniority and an undetected language. Use <em>⟳ Re-fetch details</em> (top toolbar) to fetch their detail pages and fill those in (slower; stoppable).</li>
           <li><strong>Fragile selectors</strong> — LinkedIn changes its HTML markup without notice. If results are empty or fields are missing, selectors in <code>src/parser.py</code> may need updating.</li>
           <li><strong>Public data only</strong> — no private profiles, no messages, no company internal data.</li>
@@ -662,9 +662,31 @@
       if (activeTab === tab) renderMemory(tab);
     }
 
+    // Client-side industry filter shared by the saved Jobs + Companies tabs.
+    // (Instant; the data is already loaded — no re-query.)
+    const savedFilters = { jobs: { industry: "" }, companies: { industry: "" } };
+    function distinctSorted(items, key) {
+      return [...new Set(items.map((it) => it[key]).filter(Boolean))].sort();
+    }
+    function industryFilterBar(tab, values) {
+      if (!values.length) return "";
+      const cur = savedFilters[tab].industry;
+      const opts = `<option value="">All industries (${values.length})</option>` +
+        values.map((v) => `<option value="${esc(v)}" ${v === cur ? "selected" : ""}>${esc(v)}</option>`).join("");
+      return `<div style="margin:2px 0 12px"><label style="font-size:13px;color:var(--muted)">`
+        + `Industry <select id="saved-industry" style="margin-left:4px">${opts}</select></label></div>`;
+    }
+    function wireIndustryFilter(tab, rerender) {
+      const sel = $("saved-industry");
+      if (sel) sel.addEventListener("change", () => { savedFilters[tab].industry = sel.value; rerender(); });
+    }
+
     function renderJobs(jobs) {
       if (!jobs.length) { view.innerHTML = `<div class="empty">No jobs to show. Run a search above.</div>`; return; }
-      const html = jobs.map((j) => {
+      const bar = industryFilterBar("jobs", distinctSorted(jobs, "industries"));
+      const cur = savedFilters.jobs.industry;
+      const shown = cur ? jobs.filter((j) => j.industries === cur) : jobs;
+      const html = shown.map((j) => {
         const title = j.url ? `<a href="${esc(j.url)}" target="_blank" rel="noopener">${esc(j.title)}</a>` : esc(j.title);
         const company = j.company_url
           ? `<a class="link" href="${esc(j.company_url)}" target="_blank" rel="noopener">${esc(j.company)}</a>` : esc(j.company);
@@ -673,11 +695,16 @@
         if (j.location) tags.push(`<span class="tag">📍 ${esc(j.location)}</span>`);
         if (wt) tags.push(`<span class="tag ${wt}">${esc(wt.replace("_", "-"))}</span>`);
         if (j.seniority) tags.push(`<span class="tag">${esc(j.seniority)}</span>`);
+        if (j.industries) tags.push(`<span class="tag">🏷 ${esc(j.industries)}</span>`);
+        if (j.language) tags.push(`<span class="tag">${esc(j.language.toUpperCase())}</span>`);
         if (j.applicant_count != null) tags.push(`<span class="tag">👥 ${j.applicant_count}</span>`);
         return `<article class="job"><h3>${title}</h3><div class="company">${company}</div>
           <div class="meta">${tags.join("")}</div></article>`;
       }).join("");
-      view.innerHTML = `<div class="results">${html}</div>`;
+      view.innerHTML = bar + (shown.length
+        ? `<div class="results">${html}</div>`
+        : `<div class="empty">No saved jobs in this industry.</div>`);
+      wireIndustryFilter("jobs", () => renderJobs(jobs));
     }
 
     // ---------- companies ----------
@@ -700,17 +727,24 @@
 
     function renderCompanies(companies) {
       if (!companies.length) { view.innerHTML = `<div class="empty">No companies yet. Use the Companies search above.</div>`; return; }
-      const rows = companies.map((c) => `
+      const bar = industryFilterBar("companies", distinctSorted(companies, "industry"));
+      const cur = savedFilters.companies.industry;
+      const shown = cur ? companies.filter((c) => c.industry === cur) : companies;
+      const rows = shown.map((c) => `
         <tr class="clickable" data-company="${c.id}">
           <td><b>${esc(c.name)}</b>${c.industry ? `<div style="color:var(--muted);font-size:12px">${esc(c.industry)}</div>` : ""}</td>
           <td class="num-cell">${c.listing_count}</td>
           <td>${esc(c.location || "—")}</td>
+          <td>${c.language ? esc(c.language.toUpperCase()) : "—"}</td>
           <td>${c.company_url ? `<a class="link" href="${esc(c.company_url)}" target="_blank" rel="noopener" onclick="event.stopPropagation()">LinkedIn ↗</a>` : "—"}</td>
           <td><button class="btn-ghost btn-sm" data-view="${c.id}">View</button></td>
         </tr>`).join("");
-      view.innerHTML = `<table><thead><tr><th>Company</th><th>Open listings</th><th>Location</th><th>Profile</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
+      view.innerHTML = bar + (shown.length
+        ? `<table><thead><tr><th>Company</th><th>Open listings</th><th>Location</th><th>Lang</th><th>Profile</th><th></th></tr></thead><tbody>${rows}</tbody></table>`
+        : `<div class="empty">No companies in this industry.</div>`);
       view.querySelectorAll("[data-company]").forEach((tr) =>
         tr.addEventListener("click", () => openCompany(tr.dataset.company)));
+      wireIndustryFilter("companies", () => renderCompanies(companies));
     }
 
     // ---------- explore ----------
@@ -875,9 +909,10 @@
             <td><b>${esc(c.name)}</b>${c.industry ? `<div style="color:var(--muted);font-size:12px">${esc(c.industry)}</div>` : ""}</td>
             <td class="num-cell">${c.listing_count}</td>
             <td>${esc(c.location || "—")}</td>
+            <td>${c.language ? esc(c.language.toUpperCase()) : "—"}</td>
             <td><button class="btn-ghost btn-sm" data-view="${c.id}">View</button></td>
           </tr>`).join("");
-        body.innerHTML = `<table><thead><tr><th>Company</th><th>Listings</th><th>Location</th><th></th></tr></thead><tbody>${rows}</tbody></table>
+        body.innerHTML = `<table><thead><tr><th>Company</th><th>Listings</th><th>Location</th><th>Lang</th><th></th></tr></thead><tbody>${rows}</tbody></table>
           <div id="ex-empty" class="empty" style="display:none">No rows match your filter.</div>
           <div id="explore-detail" style="margin-top:18px"></div>`;
         body.querySelectorAll("[data-co]").forEach((tr) =>
@@ -1124,7 +1159,8 @@
       $("drawer-title").textContent = c.name;
       $("drawer-sub").textContent = `${c.listing_count} open listing(s)`;
       const facts = [
-        ["Industry", c.industry], ["Size", c.company_size], ["Location", c.location],
+        ["Industry", c.industry], ["Language", c.language ? c.language.toUpperCase() : null],
+        ["Size", c.company_size], ["Location", c.location],
         ["Website", c.website ? `<a class="link" href="${esc(c.website)}" target="_blank" rel="noopener">${esc(c.website)}</a>` : null],
         ["LinkedIn", c.company_url ? `<a class="link" href="${esc(c.company_url)}" target="_blank" rel="noopener">Profile ↗</a>` : null],
       ].filter(([, v]) => v);

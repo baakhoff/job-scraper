@@ -184,6 +184,10 @@ class Company(BaseModel):
     company_size: str | None = None
     website: str | None = None
     description: str | None = None
+    language: str | None = Field(
+        None,
+        description="Dominant ISO language of this company's listings (derived; heuristic).",
+    )
     listing_count: int = Field(0, description="Open listings stored for this company.")
 
 
